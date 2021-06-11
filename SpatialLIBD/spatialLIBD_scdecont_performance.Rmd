@@ -1,0 +1,282 @@
+---
+title: "Decontamination on SpatialLIBD datasets"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Load packages
+
+```{r, echo=F}
+library(SpotClean)
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(viridis)
+library(cowplot)
+library(reshape2)
+library(SoupX)
+library(celda)
+library(Seurat)
+library(scran)
+library(scuttle)
+library(spatialLIBD)
+SEED <- 2021
+source("~/Google Drive/Hallu/codes/ckgroup/spatial_data/simulation/functions_for_simulation.R")
+
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
+myPalette <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+```
+
+### Load SpatialLIBD data
+
+```{r, echo=F}
+# spatialLIBD
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/12brains.RData")
+sets_tokeep <- c("sp_151507","sp_151508","sp_151669","sp_151670","sp_151673","sp_151674")
+names(raw_matrix) <- names(slide_list_impute) <- names(slide_list) <- 
+    paste0("sp_",names(raw_matrix))
+
+# build slide object
+slide_obj_list <- list()
+for(dset in sets_tokeep){
+    slide_obj_list[[dset]] <- CreateSlide(raw_matrix[[dset]],slide_list_impute[[dset]])
+}
+```
+
+### Visualize slides
+
+```{r, echo=F, dpi=300, fig.width=11, fig.height=12}
+dp_list <- list()
+for(dset in names(slide_obj_list)){
+    cols <- myPalette(7)
+    brk <- c("Layer1","Layer2","Layer3","Layer4","Layer5","Layer6","WM")
+    if(!"Layer1"%in%slide_list[[dset]]$layer_guess){
+        cols <- cols[-(1:2)]
+        brk <- c("Layer3","Layer4","Layer5","Layer6","WM")
+    }
+    
+    dp_list[[dset]] <- VisualizeLabel(slide_obj_list[[dset]],"layer_guess",title=dset)+
+        scale_fill_manual(values = cols,breaks = brk) 
+    
+    dp <- VisualizeLabel(slide_obj_list[[dset]],"layer_guess")+
+        scale_fill_manual(values = cols,breaks = brk)+theme_nothing()
+    
+    
+}
+plot_grid(plotlist = dp_list, ncol = 2, align = "vh")
+
+```
+
+
+### Perform decontamination using SpotClean, SoupX and DecontX
+
+```{r, echo=F, eval=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_decont.RData")
+scdecont_list <- list(soupx=list(),decontx=list())
+for(dset in names(slide_obj_list)){
+    
+    raw_tmp <- assay(slide_obj_list[[dset]])[
+        metadata(decont_obj_list[[dset]])$decontaminated_genes,
+    ]
+    slide_tmp <- metadata(slide_obj_list[[dset]])$slide
+    raw_ts_tmp <- raw_tmp[,filter(slide_tmp,tissue==1)$barcode]
+    
+    # SoupX
+    scdecont_list$soupx[[dset]] <- run_soupx(raw_tmp, 
+                                             slide_tmp, 
+                                             seed=SEED)
+    
+    # DecontX
+    set.seed(SEED)
+    scdecont_list$decontx[[dset]] <- decontX(raw_ts_tmp)$decontXcounts
+}
+save(scdecont_list, file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_scdecont.RData")
+
+```
+
+
+### Check gene expression patterns after single-cell decontamination
+
+Top expressed genes (11th~20th top genes):
+
+```{r, echo=F, dpi=300, fig.width=20, fig.height=4, warning=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_decont.RData")
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_scdecont.RData")
+
+for(dset in names(scdecont_list[[1]])){
+    top_exp_genes <- rowSums(slide_obj_list[[dset]]@assays@data$raw) %>% 
+        sort(decreasing = T) %>% head(20) %>% tail(10) %>% names
+    
+    for(gn in top_exp_genes){
+        slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+        
+        max_val <- max(assay(slide_obj_list[[dset]])[gn,],
+                       scdecont_list$soupx[[dset]][gn,],
+                       decont_obj_list[[dset]]@assays@data$decont[gn,])
+        
+        dp1 <- VisualizeHeatmap(
+            slide_obj_list[[dset]],gn,
+            subset_barcodes = slide_list[[dset]]$barcode,
+            legend_range = c(1,max_val), title = paste0(dset,"_raw"))
+        dp2 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$soupx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_SoupX"))
+        
+        dp3 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$decontx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_DecontX"))
+        
+        dp4 <- VisualizeHeatmap(
+            decont_obj_list[[dset]],gn,
+            legend_range = c(1,max_val), title = paste0(dset,"_SpotClean"))
+        
+        plot(plot_grid(dp1, dp2, dp3, dp4, ncol=4, align="vh"))
+    }
+}
+```
+
+Layer marker genes:
+
+```{r, echo=F, dpi=300, fig.width=20, fig.height=4, warning=F}
+example_markers <- c("GFAP","MBP","MOBP","SNAP25", 
+                     "PCP4","LMO4","CCK", "TUBA1B",
+                     "ARPP19","SNCG")
+
+for(dset in names(scdecont_list[[1]])){
+    
+    for(gn in example_markers){
+        
+        slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+        
+        max_val <- max(assay(slide_obj_list[[dset]])[gn,],
+                       scdecont_list$soupx[[dset]][gn,],
+                       decont_obj_list[[dset]]@assays@data$decont[gn,])
+        
+        dp1 <- VisualizeHeatmap(
+            slide_obj_list[[dset]],gn,
+            subset_barcodes = slide_list[[dset]]$barcode,
+            legend_range = c(1,max_val), title = paste0(dset,"_raw"))
+        dp2 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$soupx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_SoupX"))
+        
+        dp3 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$decontx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_DecontX"))
+        
+        dp4 <- VisualizeHeatmap(
+            decont_obj_list[[dset]],gn,
+            legend_range = c(1,max_val), title = paste0(dset,"_SpotClean"))
+        
+        plot(plot_grid(dp1, dp2, dp3, dp4, ncol=4, align="vh"))
+    }
+}
+```
+
+Marker genes to show in supplement
+
+```{r, echo=F, eval=F}
+example_markers <- c("SNAP25","MOBP")
+for(dset in names(scdecont_list[[1]])[1]){
+    
+    for(gn in example_markers){
+        
+        slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+        
+        max_val <- max(assay(slide_obj_list[[dset]])[gn,],
+                       scdecont_list$soupx[[dset]][gn,],
+                       decont_obj_list[[dset]]@assays@data$decont[gn,])
+        
+        dp1 <- VisualizeHeatmap(
+            slide_obj_list[[dset]],gn,
+            subset_barcodes = slide_list[[dset]]$barcode,
+            legend_range = c(1,max_val), title = paste0(dset,"_raw"))#+theme_nothing()
+        dp2 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$soupx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_SoupX"))#+theme_nothing()
+        
+        dp3 <- VisualizeHeatmap(
+            slide_tmp,gn,scdecont_list$decontx[[dset]],
+            legend_range = c(1,max_val), title = paste0(dset,"_DecontX"))#+theme_nothing()
+        
+        dp4 <- VisualizeHeatmap(
+            decont_obj_list[[dset]],gn,
+            legend_range = c(1,max_val), title = paste0(dset,"_SpotClean"))#+theme_nothing()
+        
+        # tiff(file.path(tif_dir,paste0(dset,"_",gn,"_decont_exp_l.tif")),
+        #   units = "in", res = 300, width = 22, height = 5)
+        plot(plot_grid(dp1, dp4, dp2, dp3, ncol=4, align="vh"))
+        # dev.off()
+    }
+}
+```
+
+
+
+### Check mean, var, CoV of genes after decontamination
+
+```{r, echo=F, dpi=300, fig.width=20, fig.height=4}
+
+for(dset in names(scdecont_list[[1]])){
+    
+    target_genes <- rownames(scdecont_list$soupx[[dset]])
+    mean_df <- sd_df <- cv_df <- MA_df <-  MA_cv_df <-  data.frame(gene=target_genes)
+    
+    mat_list <- list(raw=assay(slide_obj_list[[dset]])[
+        target_genes,colnames(scdecont_list$decontx[[dset]])
+    ],
+    SoupX=scdecont_list$soupx[[dset]],
+    DecontX=scdecont_list$decontx[[dset]],
+    SpotClean=assay(decont_obj_list[[dset]])[target_genes,])
+    
+    MA_df$raw_mean <- MA_cv_df$raw_mean <- rowMeans(mat_list$raw)
+    
+    for(meth in names(mat_list)){
+        mean_df[[meth]] <- rowMeans(mat_list[[meth]])
+        sd_df[[meth]] <- apply(mat_list[[meth]], 1, sd)
+        
+        cv_df[[meth]] <- sd_df[[meth]]/mean_df[[meth]]
+        if(meth!="raw"){
+            MA_df[[meth]] <- log2(mean_df[[meth]]/MA_df$raw_mean)
+            MA_cv_df[[meth]] <- cv_df[[meth]]
+        }
+    }
+    
+    dset <- sub("sp_","LIBD_",dset)
+    gp_mean <- melt(mean_df, id.vars = c("gene","raw"),
+                    variable.name = "method",value.name = "decont") %>% 
+        ggplot(aes(x=raw, y=decont,color=method))+geom_point()+
+        geom_abline(linetype="dashed",slope = 1)+
+        theme_bw()+labs(#title=paste0(dset,": Mean expression"),
+            x="raw data",y="\ndecontaminated data")+
+        scale_x_continuous(trans = "log1p")+scale_y_continuous(trans = "log1p")+
+        theme(legend.position = "none", axis.title = element_text(size=15),
+              axis.text = element_text(size=10),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank())
+    
+    gp_cv <- melt(cv_df, id.vars = c("gene","raw"),
+                  variable.name = "method",value.name = "decont") %>% 
+        ggplot(aes(x=raw, y=decont,color=method))+geom_point()+
+        geom_abline(linetype="dashed",slope = 1)+
+        theme_bw()+labs(#title=paste0(dset,": Coefficient of variation"),
+            x="raw data",y="\ndecontaminated data")+
+        scale_x_continuous(trans = "log1p")+scale_y_continuous(trans = "log1p")+
+        theme(legend.position = "none", axis.title = element_text(size=15),
+              axis.text = element_text(size=10),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank())
+    
+    # tiff(file.path(tif_dir,paste0(dset,"_decont_gene_stats_nol.tif")),units = "in", res=300, width = 6.5, height = 3)
+    plot(plot_grid(gp_mean, gp_cv, ncol = 2, align = "vh"))
+    # dev.off()
+}
+```
+
+### Session information
+
+```{r, echo=F}
+sessionInfo()
+```

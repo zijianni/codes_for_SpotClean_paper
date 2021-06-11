@@ -1,0 +1,553 @@
+---
+title: "Decontamination on SpatialLIBD datasets"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Load packages
+
+```{r, echo=F}
+library(SpotClean)
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(viridis)
+library(cowplot)
+library(reshape2)
+library(SoupX)
+library(celda)
+library(Seurat)
+library(scran)
+library(scuttle)
+library(spatialLIBD)
+SEED <- 2021
+source("~/Google Drive/Hallu/codes/ckgroup/spatial_data/simulation/functions_for_simulation.R")
+
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
+myPalette <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+```
+
+### Load SpatialLIBD data
+
+Raw data came from their Github repo. Download processed data using SpatialLIBD package.
+
+Also load another Visium data V1_Adult_Mouse_Brain for imputation.
+
+```{r, echo=F, eval=F}
+# Load another public data slide for imputation
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain.RData")
+slide_known <- analysis_out$bcs
+
+
+# raw count matrix directory
+raw_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/spatialLIBD"
+raw_files <- list.files(raw_dir, "h5", full.names = T)
+sample_names <- gsub(".*LIBD/(.*)_raw.*","\\1",raw_files)
+
+# Load processed data
+ehub <- ExperimentHub::ExperimentHub()
+sce_LIBD <- fetch_data(type = "sce", eh = ehub, 
+                  destdir = "~/Google Drive/Hallu/DATA/10x/Spatial/spatialLIBD/")
+
+sce_layer <- fetch_data(type = "sce_layer", eh = ehub)
+modeling_results <- fetch_data("modeling_results", eh = ehub)
+
+# Load raw matrix data
+
+raw_matrix <- list()
+for(i in seq_along(raw_files)){
+    raw_matrix[[sample_names[i]]] <- Read10X_h5(raw_files[i])
+}
+names(raw_matrix) <- sample_names
+
+# Generate per-sample slides
+sce_slide <- sce_LIBD@colData@listData
+slide_list <- list()
+for(dset in sample_names){
+    slide_list[[dset]] <- sce_slide %>% data.frame %>% filter(sample_name==dset) %>% arrange()
+}
+```
+
+Impute background spots.
+
+```{r, echo=F, eval=F}
+slide_list_impute <- list()
+for(dset in sample_names){
+    slide_impute <- slide_list[[dset]] %>% select(barcode, tissue, row, col, imagerow, imagecol) %>% arrange(row, col)
+    bg_slide <- slide_known %>% select(barcode, tissue, row, col, imagerow, imagecol) %>%
+        filter(!barcode%in%slide_impute$barcode) %>% arrange(row, col)
+    bg_slide$tissue <- 0
+    
+    # estimate average row distance and column distance
+    lm_row <- lm(imagerow~row, data=slide_impute)
+    row_dist <- coef(lm_row)[2]
+    lm_col <- lm(imagecol~col, data=slide_impute)
+    col_dist <- coef(lm_col)[2]
+    
+    # impute imagerow and imagecol of background spots
+    bg_slide$imagerow <- predict(lm_row, data.frame(row=bg_slide$row))
+    bg_slide$imagecol <- predict(lm_col, data.frame(col=bg_slide$col))
+
+    slide_list_impute[[dset]] <- rbind(slide_impute, bg_slide)
+    
+    slide_list_impute[[dset]]$sum_umi <- colSums(raw_matrix[[dset]][,slide_list_impute[[dset]]$barcode])
+    slide_list_impute[[dset]]$width <- slide_list[[dset]]$width[1]
+    slide_list_impute[[dset]]$height <- slide_list[[dset]]$height[1]
+}
+
+# Add layers to imputed slides
+for(dset in sample_names){
+    slide_list_impute[[dset]] <- merge(
+        slide_list_impute[[dset]],
+        slide_list[[dset]][,c("barcode","layer_guess")],
+        by="barcode", all.x=TRUE)
+    
+    # Change barcodes to chr
+    slide_list[[dset]]$barcode <- as.character(slide_list[[dset]]$barcode)
+    slide_list_impute[[dset]]$barcode <- as.character(slide_list_impute[[dset]]$barcode)
+}
+
+save(slide_list,slide_list_impute,raw_matrix, file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/12brains.RData")
+```
+
+### Create slide objects
+
+Analyze 2 replicates in each of the 3 samples.
+
+```{r, echo=F}
+# spatialLIBD
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/12brains.RData")
+sets_tokeep <- c("sp_151507","sp_151508","sp_151669","sp_151670","sp_151673","sp_151674")
+names(raw_matrix) <- names(slide_list_impute) <- names(slide_list) <- 
+    paste0("sp_",names(raw_matrix))
+
+# build slide object
+slide_obj_list <- list()
+for(dset in sets_tokeep){
+    slide_obj_list[[dset]] <- CreateSlide(raw_matrix[[dset]],slide_list_impute[[dset]])
+}
+
+for(dset in sets_tokeep){
+    gene_tokeep <- KeepHighGene(raw_matrix[[dset]])
+    print(range(rowMeans(raw_matrix[[dset]][gene_tokeep,])))
+}
+```
+
+### Visualize slides
+
+```{r, echo=F, dpi=300, fig.width=11, fig.height=12}
+dp_list <- list()
+for(dset in names(slide_obj_list)){
+    cols <- myPalette(7)
+    brk <- c("Layer1","Layer2","Layer3","Layer4","Layer5","Layer6","WM")
+    if(!"Layer1"%in%slide_list[[dset]]$layer_guess){
+        cols <- cols[-(1:2)]
+        brk <- c("Layer3","Layer4","Layer5","Layer6","WM")
+    }
+    
+    dp_list[[dset]] <- VisualizeLabel(slide_obj_list[[dset]],"layer_guess",title=dset)+
+        scale_fill_manual(values = cols,breaks = brk) 
+    
+    dp <- VisualizeLabel(slide_obj_list[[dset]],"layer_guess")+
+        scale_fill_manual(values = cols,breaks = brk)+theme_nothing()
+
+    # tiff(file.path(tif_dir,paste0(dset,"_layers.tif")),
+    #      width = 6.4, height = 5.8,units = "in",res = 300)
+    # plot(dp)
+    # dev.off()
+    
+}
+plot_grid(plotlist = dp_list, ncol = 2, align = "vh")
+
+```
+
+### Check marker gene expression across stripes of slide regions
+
+Markers: SNAP25, GFAP, PCP4
+
+151507, 151508: row>90-col,row<=90-col+10
+
+151669, 151670: col%in%60:69
+
+151673, 151674: row>100-col,row<=100-col+10
+
+```{r, echo=F}
+mk_genes <- c("GFAP","MOBP") # "SNAP25","GFAP","PCP4","MOBP"
+
+for(dset in names(slide_obj_list)[1]){
+    
+    cols <- myPalette(7)
+    brk <- c("Layer1","Layer2","Layer3","Layer4","Layer5","Layer6","WM")
+    if(!"Layer1"%in%slide_list[[dset]]$layer_guess){
+        cols <- cols[-(1:2)]
+        brk <- c("Layer3","Layer4","Layer5","Layer6","WM")
+    }
+    
+    slide_stripe <- filter(slide_obj_list[[dset]]@metadata$slide,row>90-col,row<=90-col+10)
+
+    
+    for(mk_gene in mk_genes){
+        stripe_df <- data.frame(row=sort(unique(slide_stripe$row)),exp=NA,layer=NA)
+        layer_borders <- c()
+        for(i in seq_len(nrow(stripe_df))){
+            
+            rw <- stripe_df$row[i]
+            
+            ly <- table(filter(slide_stripe,row==rw)$layer_guess)
+            if(sum(ly)<3){
+                stripe_df$layer[i] <- "background"
+                bcs <- filter(slide_stripe,row==rw,tissue==0)$barcode
+            }else{
+                stripe_df$layer[i] <- names(ly)[which.max(ly)]
+                bcs <- filter(slide_stripe,row==rw,layer_guess==stripe_df$layer[i])$barcode
+            }
+            
+            stripe_df$exp[i] <- mean(assay(slide_obj_list[[dset]])[mk_gene,bcs])
+            
+            if(i>1){
+                if(stripe_df$layer[i]!=stripe_df$layer[i-1]){
+                    layer_borders <- c(layer_borders,i-1.5)
+                }
+            }
+            
+        }
+        
+        fname_prefix <- file.path(tif_dir,"LIBD_marker_dist",paste(dset,mk_gene,sep = "_"))
+        
+        # tiff(paste0(fname_prefix,"_exp.tif"),
+        #      width = 6.4, height = 5.8,units = "in",res = 300)
+        # plot(VisualizeHeatmap(slide_obj_list[[dset]],mk_gene))
+        # dev.off()
+        # 
+        # tiff(paste0(fname_prefix,"_exp_stripe.tif"),
+        #      width = 6.4, height = 5.8,units = "in",res = 300)
+        # plot(VisualizeHeatmap(slide_obj_list[[dset]],mk_gene,
+        #                  subset_barcodes = slide_stripe$barcode)+
+        #     theme_nothing())
+        # dev.off()
+        # 
+        # tiff(paste0(fname_prefix,"_layer_stripe.tif"),
+        #      width = 6.4, height = 5.8,units = "in",res = 300)
+        # plot(VisualizeLabel(slide_obj_list[[dset]],"layer_guess",
+        #                subset_barcodes = slide_stripe$barcode)+
+        #     scale_fill_manual(values = cols,breaks = brk)+
+        #     theme_nothing())
+        # dev.off()
+        
+        gp <- ggplot(stripe_df, aes(x=row,y=exp))+geom_point()+
+            geom_smooth(span=0.2, se=F,size=1)+xlim(c(0,max(stripe_df$row)))+ylim(c(0,max(stripe_df$exp)))+
+            theme_bw()+
+            geom_vline(xintercept = layer_borders, color="pink",size=1,linetype="dashed")+
+            theme(axis.title = element_blank(),
+                  axis.text.x = element_blank(),
+                  axis.ticks.x = element_blank(),
+                  axis.text.y = element_text(size = 15,angle = 90,hjust = 0.5),
+                  panel.grid.minor = element_blank(),
+                  panel.grid.major.x = element_blank())
+
+        # tiff(paste0(fname_prefix,"_dist.tif"),
+        #      width = 4, height = 2,units = "in",res = 300)
+        plot(gp)
+        # dev.off()
+
+    } 
+}
+
+
+```
+
+
+### Perform decontamination using SpotClean, SoupX and DecontX
+
+```{r, echo=F, eval=F}
+decont_obj_list <- list()
+for(dset in names(slide_obj_list)){
+    decont_obj_list[[dset]] <- SpotClean(slide_obj_list[[dset]])
+}
+save(decont_obj_list, file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_decont.RData")
+```
+
+### Check estimated contamination rates
+
+Heatmap of contamination rates:
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=4}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/6brains_decont.RData")
+
+for(dset in names(decont_obj_list)){
+    dp <- VisualizeHeatmap(decont_obj_list[[dset]],
+                     decont_obj_list[[dset]]@metadata$contamination_rate,
+                     logged = FALSE,
+                     title=dset,
+                     legend_title="contamination rates", 
+                     legend_range = c(0,1))
+    plot(dp)
+}
+
+melt(
+    lapply(decont_obj_list, function(x) x@metadata$contamination_rate)
+) %>% ggplot(aes(y=value,color=L1)) + geom_boxplot() + labs(color="data")
+```
+
+### Visualize decontaminated genes
+
+For better visualization, trim out values less than 1. 
+Show first two samples as examples.
+
+GFAP: Layer1+WM
+MBP, MOBP, PLP1: WM
+SNAP25, LMO4, SYT1!, GRIN1!, NRGN!, SLC17A7!: Layer2-Layer6
+PCP4: Layer5
+CCK: Layer2, 3, 6
+ARPP19, FXYD6: Layer2, 3, 5, 6
+SNCG: Layer3, 5
+
+Marker gene list comes from supplementary file of spatialLIBD paper.
+
+```{r, echo=F, dpi=300, fig.width=10, fig.height=5}
+layer_marker_genes <- readxl::read_xlsx("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/spatialLIBD_supplementary.xlsx",sheet = "Table S5")
+
+marker_genes <- c("GFAP","MBP","SNAP25",
+                  "PCP4","CCK")
+
+marker_genes <- c("GFAP","MBP","MOBP","PLP1","SNAP25",
+                  "LMO4","SYT1","GRIN1","NRGN","SLC17A7",
+                  "PCP4","CCK", "ARPP19","FXYD6","SNCG")
+for(dset in names(decont_obj_list)[1]){
+    dp_list <- list()
+    for(gn in marker_genes){
+        cat(gn,dset)
+        
+        slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+        
+        dp1 <- VisualizeHeatmap(
+            slide_obj_list[[dset]],gn,
+            subset_barcodes = slide_list[[dset]]$barcode,
+            legend_range = c(1,max(assay(decont_obj_list[[dset]])[gn,])))#+theme_nothing()
+        dp2 <- VisualizeHeatmap(
+            decont_obj_list[[dset]],gn,
+            legend_range = c(1,max(assay(decont_obj_list[[dset]])[gn,])))#+theme_nothing()
+        
+        plot(plot_grid(dp1, dp2, align = "vh", ncol=2))
+        dp_list <- c(dp_list,list(dp1, dp2))
+    }
+    # tiff(file.path(tif_dir,paste0(dset,"_decont_nol.tif")),res = 300, units = "in", width = 13, height = 26)
+    # plot(plot_grid(plotlist = dp_list,  ncol = 2, align = "vh"))
+    # dev.off()
+}
+```
+
+Boxplots for marker genes in different layers
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=3}
+
+marker_genes <- c("GFAP","MOBP","SNAP25","MBP","PLP1",
+                  "LMO4","SYT1","GRIN1","NRGN","SLC17A7",
+                  "PCP4","CCK", "ARPP19","FXYD6","SNCG")
+
+for(dset in names(decont_obj_list)[1]){
+    
+    cols <- myPalette(7)
+    brk <- c("Layer1","Layer2","Layer3","Layer4","Layer5","Layer6","WM")
+    if(!"Layer1"%in%slide_list[[dset]]$layer_guess){
+        cols <- cols[-(1:2)]
+        brk <- c("Layer3","Layer4","Layer5","Layer6","WM")
+    }
+    
+    ts_slide <- filter(slide_obj_list[[dset]]@metadata$slide, !is.na(layer_guess))
+    marker_df <- data.frame(layer=factor(ts_slide$layer_guess, levels = brk))
+    
+    dp1_list <- dp2_list <- list()
+    
+    for(gn in marker_genes){
+        marker_df$exp_raw <- assay(slide_obj_list[[dset]])[gn,ts_slide$barcode]
+        marker_df$exp_decont <- assay(decont_obj_list[[dset]])[gn,ts_slide$barcode]
+        
+        max_val <- max(marker_df[,-1])
+        dp1 <- ggplot(marker_df, aes(y=exp_raw, fill=layer))+
+            geom_boxplot()+labs(title=paste0("\n",gn),y=NULL, fill="Layer")+
+            lims(y=c(0,max_val))+
+            scale_fill_manual(values = cols,breaks = brk)+
+            theme(axis.text.x = element_blank(),
+                  axis.ticks.x = element_blank(),
+                  axis.text.y = element_text(size = 10),
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  legend.position = "none")
+        dp2 <- ggplot(marker_df, aes(y=exp_decont, fill=layer))+
+            geom_boxplot()+labs(title=paste0("\n",gn),y=NULL, fill="Layer")+
+            lims(y=c(0,max_val))+
+            scale_fill_manual(values = cols,breaks = brk)+
+            theme(axis.text.x = element_blank(),
+                  axis.ticks.x = element_blank(),
+                  axis.text.y = element_text(size = 10),
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  legend.position = "none")
+        # tiff(file.path(tif_dir,"LIBD_marker_boxplot_label.tif"),res = 300, 
+        #      width = 5, height = 5, units = "in")
+        plot(plot_grid(dp1, dp2, ncol = 2, align = "vh"))
+        # dev.off()
+        
+        dp1_list[[gn]] <- dp1
+        dp2_list[[gn]] <- dp2
+        
+        
+    }
+    
+    # tiff(file.path(tif_dir,"LIBD_marker_boxplot_raw.tif"),res = 300,
+    #      width = 10, height = 7, units = "in")
+    plot(plot_grid(plotlist=dp1_list, ncol = 5, align = "vh"))
+    # dev.off()
+
+    # tiff(file.path(tif_dir,"LIBD_marker_boxplot_decont.tif"),res = 300,
+    #      width = 10, height = 7, units = "in")
+    plot(plot_grid(plotlist=dp2_list, ncol = 5, align = "vh"))
+    # dev.off()
+}
+
+```
+
+
+### Normalization before DE
+
+```{r, echo=F}
+norm_list <- list(raw=list(),decont=list())
+for(dset in names(decont_obj_list)){
+    print(dset)
+    for(meth in c("raw","decont")){
+        if(meth=="raw"){
+            ts_mat <- assay(slide_obj_list[[dset]])[,slide_list[[dset]]$barcode]
+        }else{
+            ts_mat <- assay(decont_obj_list[[dset]])
+        }
+        
+        set.seed(SEED)
+        sce <- SingleCellExperiment(list(counts=ts_mat))
+        clusters <- quickCluster(sce, min.size=200)
+        sce <- computeSumFactors(sce, cluster=clusters)
+        min_sf <- min(sce$sizeFactor[sce$sizeFactor>0])
+        # deal with potential nonpositive size factors
+        sce$sizeFactor[sce$sizeFactor<=0] <- min_sf
+        sce <- logNormCounts(sce)
+    
+        norm_list[[meth]][[dset]] <- logcounts(sce)
+    }
+}
+
+```
+
+
+### Check DE results of known DE genes
+
+Check Layer1 v.s. Layer6
+
+Known marker genes used: (1) fdr<=1e-5 in SpatialLIBD, (2) decontaminated by SpotClean (recall that SpotClean filter out low-expressed and low-variable genes), (3) within top 100 highest expressed genes in raw data. 
+
+Then show top 10 genes sorted by fold change.
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=4}
+pairwise_marker_genes <- readxl::read_xlsx("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/spatialLIBD_supplementary.xlsx",sheet = "Table S4C")
+
+layer_markers <- pairwise_marker_genes %>% 
+    filter(`fdr_WM-Layer6`<=1e-5) %>% .$gene
+
+DE_all <- list()
+for(dset in names(slide_obj_list)){ # no layer1 in the middle two samples
+    cat("\n")
+    cat(dset)
+    
+    # Choose marker genes: small fdr, decontaminated, top expressed, top FC
+    
+    markers <- layer_markers[
+        layer_markers%in%rownames(norm_list$raw[[dset]])
+    ]
+    markers <- markers[markers%in%metadata(decont_obj_list[[dset]])$decontaminated_genes]
+    
+    ave_exp <- rowMeans(raw_matrix[[dset]])
+    top100 <- ave_exp %>% sort(decreasing = T) %>% head(100) %>% names
+    markers <- markers[markers%in%top100]
+    
+    # spots in different layers
+    spot1 <- slide_list[[dset]] %>% filter(layer_guess=="WM") %>% .$barcode
+    spot2 <- slide_list[[dset]] %>% filter(layer_guess=="Layer6") %>% .$barcode
+    
+    # Report top10 DE genes sorted by |logFC|
+    logFC <- log(rowMeans(norm_list$raw[[dset]][markers,spot1])/
+        rowMeans(norm_list$raw[[dset]][markers,spot2]))
+    
+    markers <- abs(logFC) %>% sort(decreasing = T) %>% head(10) %>% names
+    
+    # initialization
+    DE_all[[dset]] <- data.frame(gene=markers)
+    for(meth in names(norm_list)){
+        DE_all[[dset]][[paste0(meth,"_-log10_pval")]] <- NA
+        DE_all[[dset]][[paste0(meth,"_logfc")]] <- NA
+    }
+    # loop for marker genes
+    for(i in seq_along(markers)){
+        
+        gene <- markers[i]
+        
+        for(meth in names(norm_list)){
+            # expressions in two layers
+            exp1 <- norm_list[[meth]][[dset]][gene,spot1]
+            exp2 <- norm_list[[meth]][[dset]][gene,spot2]
+            logfc <- log(mean(exp1)/mean(exp2))
+            
+            # t-test
+            tt <- t.test(exp1, exp2)
+            
+            DE_all[[dset]][i,paste0(meth,"_-log10_pval")] <- 
+                -log10(tt$p.value)
+            DE_all[[dset]][i,paste0(meth,"_logfc")] <- logfc
+        }
+    }
+    
+    # remove genes not present
+    DE_all[[dset]] <- DE_all[[dset]][!apply(DE_all[[dset]],1, function(x) any(is.na(x))),]
+    
+}
+
+# Visualize fold change and p-value
+
+for(dset in names(DE_all)){
+    pl <- plot_grid(
+        ggplot(reshape2::melt(DE_all[[dset]],id.vars="gene",
+                              measure.vars=paste0(names(norm_list),"_logfc")), 
+               aes(y=value, x=gene, fill=variable))+
+            geom_bar(position="dodge", stat="identity")+
+            theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                  axis.title.x = element_blank(),
+                  legend.position = "none",
+                  panel.grid.minor = element_blank(),
+                  axis.title.y = element_text(size = 15),
+                  axis.text = element_text(size=10))+
+            labs(y="log FC"),
+        
+        ggplot(reshape2::melt(DE_all[[dset]],id.vars="gene",
+                              measure.vars=paste0(names(norm_list),"_-log10_pval")), 
+               aes(y=value, x=gene, fill=variable))+
+            geom_bar(position="dodge", stat="identity")+
+            theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                  axis.title.x = element_blank(),
+                  legend.position = "none",
+                  panel.grid.minor = element_blank(),
+                  axis.title.y = element_text(size = 15),
+                  axis.text = element_text(size=10))+
+            labs(y="-log10 p-value"),
+        ncol = 1,align = "vh")
+    
+    # tiff(file.path(tif_dir,paste0(dset,"_DE.tif")),res = 300, units = "in", width = 5,height = 4)
+    plot(pl)
+    # dev.off()
+}
+```
+
+### Session information
+
+```{r, echo=F}
+sessionInfo()
+```

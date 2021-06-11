@@ -1,0 +1,278 @@
+---
+output: html_document
+title: "`r params$html_title`"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+params:
+    html_title: "foo"
+    RData_dir: "foo"
+---
+
+```{r, include=F}
+####################
+# No need to edit this file unless adding new functionalities
+####################
+
+load(params$RData_dir) # all the rest are based on analysis_out
+```
+
+```{r, include=F}
+library(ggplot2)
+library(Matrix)
+library(cowplot)
+library(RColorBrewer)
+library(grid)
+library(readbitmap)
+library(dplyr)
+library(SpotClean)
+library(S4Vectors)
+
+SEED <- 2021
+
+bw_col <- c("#000000","#e9e9e9")
+gw_col <- c("#727272","#e9e9e9")
+ts_col <- c("#FF9DC7","#ca8bb1")
+bg_col <- c("#D8D8D8","#767171")
+names(bw_col) <- c("1","0")
+names(gw_col) <- c("1","0")
+colScale_bw <- scale_fill_manual(values = bw_col)
+colScale_gw <- scale_fill_manual(values = gw_col)
+
+slide_info <- list(slide=analysis_out$bcs)
+if(!is.null(analysis_out$images_tibble)){
+    slide_info$grob <- analysis_out$images_tibble$grob[[1]]
+}
+raw_obj <- CreateSlide(analysis_out$raw_matrix,
+                       slide_info,
+                       gene_cutoff = 0)
+```
+
+#### Color by spots labels (tissue or not)
+
+```{r,echo=F, dpi=300, fig.width=18, fig.height=4.5}
+plots_labels <- VisualizeLabel(raw_obj, label="tissue", 
+                               title=paste0(analysis_out$sample_name,
+                                            ": raw image with spots labels"), 
+                               legend_title = "Tissue spots?")
+
+plots_labels_bw <- VisualizeLabel(raw_obj, 
+                                  label="tissue", 
+                                  title=paste0(analysis_out$sample_name,
+                                               ": spots labels (b/w)"), 
+                                  legend_title = "Tissue spots?") + colScale_bw
+
+
+if(!is.null(analysis_out$images_tibble)){
+    plots_raw <- VisualizeSlide(raw_obj)
+}else{
+    plots_raw <- plots_labels
+}
+
+
+plot_grid(plotlist = list(plots_raw, plots_labels, plots_labels_bw), ncol = 3)
+```
+
+#### Color by UMI counts, non-zero genes, mitochondrial proportions
+
+
+```{r,echo=F, dpi=300, fig.width=18, fig.height=4.5}
+plots_umi_counts <- VisualizeHeatmap(
+        raw_obj,value = "sum_umi",viridis = FALSE, 
+        legend_range = range(metadata(raw_obj)$slide$sum_umi),
+        legend_title = "total UMIs",
+        title = paste0(analysis_out$sample_name,": total UMI counts")
+    )
+
+plots_nz_gene <- VisualizeHeatmap(
+        raw_obj,value = "sum_gene",viridis = FALSE, 
+        legend_range = range(metadata(raw_obj)$slide$sum_gene),
+        legend_title = "nonzero genes",
+        title=paste0(analysis_out$sample_name,": number of non-zero genes")
+    )
+
+plots_mt_prop <- VisualizeHeatmap(
+        raw_obj,value = "mt_prop",viridis = FALSE, 
+        logged = FALSE,
+        legend_title ="mitochondrial\nproportion",
+        title=paste0(analysis_out$sample_name,": mitochondrial UMI proportions")
+    )
+
+plot_grid(plotlist = list(plots_umi_counts, plots_nz_gene, plots_mt_prop), ncol = 3)
+```
+
+#### For mixed-species data, color by human counts, mouse counts, human proportion
+
+```{r,echo=F, dpi=300, fig.width=18, fig.height=4.5}
+if(!is.null(analysis_out$bcs$sum_human_umi)){
+    
+    plots_human_counts <- VisualizeHeatmap(
+        raw_obj,value = "sum_human_umi",viridis = FALSE, 
+        legend_range = range(metadata(raw_obj)$slide$sum_human_umi),
+        legend_title = "total human UMIs",
+        title = paste0(analysis_out$sample_name,": total human UMI counts")
+    )
+    
+    plots_mouse_counts <- VisualizeHeatmap(
+        raw_obj,value = "sum_mouse_umi",viridis = FALSE, 
+        legend_range = range(metadata(raw_obj)$slide$sum_mouse_umi),
+        legend_title = "total mouse UMIs",
+        title = paste0(analysis_out$sample_name,": total mouse UMI counts")
+    )
+    
+    plots_human_prop <- VisualizeHeatmap(
+        raw_obj,value = "prop_human",viridis = FALSE, logged = FALSE,
+        legend_range = range(metadata(raw_obj)$slide$prop_human),
+        legend_title = "human UMI\nproportion",
+        title = paste0(analysis_out$sample_name,": human UMI proportions")
+    )
+    
+    plot_grid(plotlist = list(plots_human_counts, plots_mouse_counts, 
+                              plots_human_prop), ncol = 3)
+    
+}
+```
+
+
+
+#### Color by whether total UMIs are above certain cutoffs
+
+```{r,echo=F, dpi=300, fig.width=11, fig.height=24}
+plots_umi_cutoff <- list()
+cutoffs <- grep("cutoff",colnames(analysis_out$bcs), value = T)
+if(length(cutoffs)>0){
+    for(cutoff in cutoffs){
+        metadata(raw_obj)$slide$cutoff_temp <- factor(analysis_out$bcs[,cutoff])
+        plots_umi_cutoff[[cutoff]] <- 
+            VisualizeLabel(raw_obj, 
+                           label="cutoff_temp", 
+                           title=paste0(analysis_out$sample_name,
+                                        ": ",cutoff), 
+                           legend_title = paste0("Above ",cutoff,"?"))+
+            colScale_bw
+    }
+    plot_grid(plotlist = plots_umi_cutoff, ncol = 2)
+}
+
+
+
+```
+
+#### Distribution of sum UMIs in tissue and background
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=4}
+ggplot()+geom_density(data=analysis_out$bcs%>%filter(tissue==1),aes(x=sum_umi), color=ts_col[2], fill=ts_col[1], alpha=0.5, size=1.3)+
+    geom_density(data=analysis_out$bcs%>%filter(tissue==0),aes(x=sum_umi), color=bg_col[2],fill=bg_col[1], alpha=0.5, size=1.3)+
+  scale_x_continuous(trans="log1p",breaks = c(0,10^(0:6)))+
+  labs(title = "total UMI counts distribution", subtitle = "Gray: background. Pink: tissue.")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+
+#### Color by the (unnormalized) top 4 highest expressed gene in tissue spots
+
+```{r,echo=F, dpi=300, fig.width=11, fig.height=8}
+plots_top4 <- list()
+ts_raw <- analysis_out$raw_matrix[,analysis_out$bcs$tissue==1]
+top_gene <- rowMeans(ts_raw) %>% 
+    sort(decreasing = T) %>% head(4) %>% names
+
+for(gn in top_gene){
+    analysis_out$bcs$top_gene <- analysis_out$raw_matrix[gn,]
+    
+    plots_top4[[gn]] <- VisualizeHeatmap(
+        raw_obj, gn, viridis = FALSE,
+        title = paste0(analysis_out$sample_name,
+                       ": raw UMI counts of top 4 genes")
+    )
+}
+
+plot_grid(plotlist = plots_top4, ncol = 2)
+```
+
+
+#### UMAP plots colored by Seurat clusters and spots labels
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=6}
+dp1 <- Seurat::DimPlot(analysis_out$S_obj, reduction = "umap", 
+               label = TRUE)+
+    ggtitle("Cluster")
+dp2 <- Seurat::DimPlot(analysis_out$S_obj, reduction = "umap", 
+               label = FALSE, group.by = "bc_label", cols=c("#CCCCCC","#FF7BAC"))+
+    ggtitle("Tissue spots?")
+
+plot_grid(plotlist = list(dp1,dp2))
+```
+
+#### Visualize Seurat clusters in spatial image
+
+```{r,echo=F, dpi=300}
+VisualizeLabel(raw_obj, "clust",
+               title = paste0(analysis_out$sample_name,": clusters"),
+               subset_barcodes = filter(analysis_out$bcs,tissue==1)$barcode,
+               legend_title = "Seurat clusters")
+
+VisualizeLabel(raw_obj, "clust",
+               title = paste0(analysis_out$sample_name,": clusters"),
+               legend_title = "Seurat clusters")
+
+```
+
+#### Visualize individual clusters
+
+Only show clusters with mixed tissue and background spots (mix score $\in [0.02, 0.98]$)
+
+```{r, echo=F}
+cand_clust <- c()
+for(cl in unique(analysis_out$bcs$clust)){
+    
+    # proportion of tissue spots within a cluster
+    mix_score <- analysis_out$bcs %>% 
+        filter(clust==cl) %>% 
+        select(tissue,) %>% 
+        unlist %>%
+        as.character %>%
+        as.integer %>% 
+        mean
+    #print(mix_score)
+    
+    if(abs(mix_score-0.5)<=0.48){
+        cand_clust <- c(cand_clust, cl)
+    }
+}
+
+plots_singlecluster <- list()
+
+for(i in seq_along(cand_clust)){
+    plots_singlecluster[[i]] <- analysis_out$bcs %>%
+        filter(clust==cand_clust[i]) %>%
+        ggplot(aes(x=imagecol,y=imagerow, color=tissue, fill=clust)) +
+        geom_point(shape = 21, size = 1.75, stroke = 0.5)+
+        coord_cartesian(expand=FALSE)+
+        scale_color_manual(values = bw_col)+
+        xlim(0,max(analysis_out$bcs %>% 
+                       select(width)))+
+        ylim(max(analysis_out$bcs %>% 
+                     select(height)),0)+
+        xlab("") +
+        ylab("") +
+        ggtitle(paste0(analysis_out$sample_name,": cluster ",cand_clust[i]))+
+        labs(fill = "Seurat cluster")+
+        guides(fill = guide_legend(override.aes = list(size=3)))+
+        theme_set(theme_bw(base_size = 10))+
+        theme(panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"),
+              axis.text = element_blank(),
+              axis.ticks = element_blank())
+}
+
+f_height <- 4*ceiling(length(cand_clust)/2)
+```
+
+```{r, echo=F, dpi=300, fig.width=11, fig.height=f_height}
+if(length(cand_clust)>0){
+    plot_grid(plotlist = plots_singlecluster, ncol = 2)
+}
+```

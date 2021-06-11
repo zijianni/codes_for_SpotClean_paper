@@ -1,0 +1,189 @@
+---
+title: "Simulation for MSE evaulation"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Load data and functions
+
+```{r, echo=F}
+library(SpotClean)
+library(SummarizedExperiment)
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(viridis)
+library(cowplot)
+library(reshape2)
+library(Seurat)
+library(SoupX)
+library(celda)
+
+SEED <- 2021
+
+source("~/Google Drive/Hallu/codes/ckgroup/spatial_data/simulation/functions_for_simulation.R")
+
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/public_spatial_datasets.RData")
+sample_names <- c("LIBD_151507","LIBD_151508","LIBD_151669","LIBD_151670","LIBD_151673","LIBD_151674",
+                  "mouse_brain","mouse_kidney","human_breast","human_lymphnode","human_spinalcord")
+
+slide_obj_list <- list()
+for(dset in names(raw_list)){
+    slide_obj_list[[dset]] <- CreateSlide(raw_list[[dset]], 
+                                          list(slide=slide_all_list[[dset]]),
+                                          gene_cutoff = 0)
+}
+
+names(sample_names) <- names(slide_obj_list)[c(6:11,1:5)]
+
+rm(raw_list)
+gc()
+```
+
+### Simulation based on mouse_brain, mouse_kidney, breast_cancer, lymph_node, targeted_spinalcord, 6 spatialLIBD datasets
+
+Use top 3000 highly expressed genes in raw data as true expression. 
+For illustration purpose, use manually specified parameters for simulation.
+
+Try different kernels: linear, laplace, cauchy
+
+```{r, echo=F}
+sim_list <- sim_obj_list <- list()
+for(dset in names(slide_obj_list)){
+    print(dset)
+    sim_list[[dset]] <- sim_spatial_matrix(slide_obj_list[[dset]],
+                                           umi_per_spot = 2e4,
+                                           kernel = "cauchy",
+                                           seed=SEED)
+
+    sim_obj_list[[dset]] <- CreateSlide(sim_list[[dset]]$obs_mat,
+                                list(slide=slide_all_list[[dset]],
+                                     cont_rate=sim_list[[dset]]$cont_rate),
+                                gene_cutoff = 0, verbose = F)
+}
+
+```
+
+Compare simulated data with real data. 
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=6}
+for(dset in names(slide_obj_list)){
+    
+    target <- rowSums(assay(slide_obj_list[[dset]])) %>% 
+        sort(decreasing = T) %>%
+        head(20) %>% 
+        tail(1) %>%
+        names
+
+    vs1 <- VisualizeHeatmap(slide_obj_list[[dset]], target,
+                           title = paste0(dset,": real_data_exp"))
+    vs2 <- VisualizeHeatmap(sim_obj_list[[dset]], target,
+                           title = paste0(dset,": sim_data_exp"))
+    
+    plot(plot_grid(vs1, vs2, ncol = 2, align = "vh"))
+
+}
+
+```
+
+### Perform decontamination using SoupX, DecontX, SpotClean
+
+```{r, echo=F, eval=F}
+sim_decont_list <- list(soupx=list(), decontx=list(), SpotClean=list())
+
+for(dset in names(sim_obj_list)){
+    
+    print(dset)
+    
+    raw_tmp <- sim_list[[dset]]$obs_mat
+    raw_ts_tmp <- raw_tmp[,filter(slide_all_list[[dset]], tissue==1)$barcode]
+    
+    # SoupX
+    sim_decont_list$soupx[[dset]] <- run_soupx(raw_tmp, slide_all_list[[dset]], seed=SEED)
+
+    # DecontX
+    set.seed(SEED)
+    sim_decont_list$decontx[[dset]] <- decontX(raw_ts_tmp)$decontXcounts
+    
+    # SpotClean
+    set.seed(SEED)
+    sim_decont_list$SpotClean[[dset]] <- SpotClean(sim_obj_list[[dset]],rownames(sim_obj_list[[dset]]))
+
+}
+
+save(sim_obj_list,sim_decont_list, 
+     file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_decont_forMSE.RData")
+```
+
+### Check estimation of contamination rate
+
+Lymph node: probably due to not converging. Increasing max iteration will make it better.
+
+```{r, echo=F, dpi=300, fig.width=7,fig.height=6}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_decont_forMSE.RData")
+
+gp_list <- list()
+for(dset in names(slide_obj_list)[c(6:11,1:5)]){
+    print(dset)
+    true_rates <- sim_list[[dset]]$cont_rate
+    est_rates <- sim_decont_list$SpotClean[[dset]]@metadata$contamination_rate
+    df_tmp <- data.frame(true_rates=true_rates,est_rates=est_rates)
+    gp <- ggplot(df_tmp, aes(x=true_rates,y=est_rates))+
+        geom_point(shape=20)+
+        ggtitle(sample_names[dset])+
+        geom_abline(slope = 1, color="pink")+lims(x=c(0,1),y=c(0,1))+
+        theme_classic()+theme(axis.title = element_blank())
+    gp_list <- c(gp_list,list(gp))
+    
+}
+
+# tiff("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots/sim_cont_rate.tif",
+#      res = 300, units = "in", width = 7, height = 7)
+plot_grid(plotlist = gp_list, ncol = 3, align = "vh")
+# dev.off()
+```
+
+# MSE between decontaminated matrix and true expression matrix
+
+```{r, echo=F}
+
+if(is(sim_decont_list$SpotClean[[1]],"SummarizedExperiment")){
+    sim_decont_list$SpotClean <- lapply(sim_decont_list$SpotClean, function(x) assay(x))
+}
+
+MSE_mat <- matrix(0, length(sim_decont_list[[1]]),
+                  length(sim_decont_list)+1)
+rownames(MSE_mat) <- names(sim_decont_list[[1]])
+colnames(MSE_mat) <- c("raw", names(sim_decont_list))
+
+for(dset in rownames(MSE_mat)){
+    ts_bc <- colnames(sim_decont_list$SpotClean[[dset]])
+    obs_ts_mat <- sim_list[[dset]]$obs_mat[,ts_bc]
+    
+    MSE_mat[dset,"raw"] <- mean((obs_ts_mat-sim_list[[dset]]$true_mat[,ts_bc])^2)
+    
+    for(method in names(sim_decont_list)){
+        if(is.character(sim_decont_list[[method]][[dset]])){
+            MSE_mat[dset,method] <- NA
+        }else{
+            MSE_mat[dset,method] <- mean((sim_decont_list[[method]][[dset]]-
+                                              sim_list[[dset]]$true_mat[,ts_bc])^2)
+        }
+        
+    }
+}
+
+
+round(MSE_mat,3)
+
+```
+
+
+
+
+### Session Information
+
+```{r}
+sessionInfo()
+```

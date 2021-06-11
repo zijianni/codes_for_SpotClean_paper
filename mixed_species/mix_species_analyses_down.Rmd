@@ -1,0 +1,841 @@
+---
+title: "Analyzing the mixed-species data"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+- (HM-1) 2_S2: Mouse duodenum as sausage casing to human punch
+
+- (HM-2) 1_S1: Mouse colon as sausage casing to human punch
+
+- (HM-3) 3_S3: Mouse heart enwrapped in human skin
+
+```{r, echo=F}
+library(SpotClean)
+library(ggplot2)
+library(Matrix)
+library(scuttle)
+library(Seurat)
+library(dplyr)
+library(reshape2)
+library(cowplot)
+
+SEED <- 2021
+
+rdata_dir <- c("~/Google Drive/Hallu/codes/ckgroup/spatial_data/1_S1_manual/1_S1_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/2_S2_manual/2_S2_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/3_S3_manual/3_S3_manual.RData")
+species_refined_dir <- c("~/Google Drive/Hallu/DATA/10x/Spatial/mix_species/1_S1_manual/species_refined2.csv",
+                 "~/Google Drive/Hallu/DATA/10x/Spatial/mix_species/2_S2_manual/species_refined2.csv",
+                 "~/Google Drive/Hallu/DATA/10x/Spatial/mix_species/3_S3_manual/species_refined2.csv")
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
+myPalette <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+
+.theme_void <- function (base_size = 11, base_family = "", base_line_size = base_size/22, 
+    base_rect_size = base_size/22) 
+{
+    half_line <- base_size/2
+    t <- theme(line = element_blank(), rect = element_blank(), 
+        text = element_text(family = base_family, face = "plain", 
+            colour = "black", size = base_size, lineheight = 0.9, 
+            hjust = 0.5, vjust = 0.5, angle = 0, margin = margin(), 
+            debug = FALSE), axis.text = element_blank(), axis.title = element_blank(), 
+        axis.ticks.length = unit(0, "pt"), axis.ticks.length.x = NULL, 
+        axis.ticks.length.x.top = NULL, axis.ticks.length.x.bottom = NULL, 
+        axis.ticks.length.y = NULL, axis.ticks.length.y.left = NULL, 
+        axis.ticks.length.y.right = NULL, legend.box = NULL, 
+        legend.position = "none", 
+        strip.text = element_text(size = rel(0.8)), strip.switch.pad.grid = unit(half_line/2, 
+            "pt"), strip.switch.pad.wrap = unit(half_line/2, 
+            "pt"), panel.ontop = FALSE, panel.spacing = unit(half_line, 
+            "pt"), plot.margin = unit(c(0, 0, 0, 0), "lines"), 
+        plot.title = element_text(size = rel(1.2), hjust = 0, 
+            vjust = 1, margin = margin(t = half_line)), plot.title.position = "panel", 
+        plot.subtitle = element_text(hjust = 0, vjust = 1, margin = margin(t = half_line)), 
+        plot.caption = element_text(size = rel(0.8), hjust = 1, 
+            vjust = 1, margin = margin(t = half_line)), plot.caption.position = "panel", 
+        plot.tag = element_text(size = rel(1.2), hjust = 0.5, 
+            vjust = 0.5), plot.tag.position = "topleft", 
+        complete = TRUE)
+    ggplot2:::ggplot_global$theme_all_null %+replace% t 
+}
+
+find_border <- function(slide, is_tissue=TRUE){
+    # Find border spots. i.e. tissue spots adjacent to background spots, or
+    # background spots adjacent to tissue spots.
+    # Args:
+    #   slide (dataframe): the slide data frame
+    #   is_tissue (logical): whether return tissue border or background border
+    # Returns:
+    #   (dataframe) slide dataframe with additional column indicating
+    #       border (1) or not (0)
+    is_tissue <- as.integer(is_tissue)
+    target_positions <- slide %>% filter(tissue==is_tissue) %>% select(row, col)
+    remaining_positions_1d <- slide %>% filter(tissue==(1-is_tissue)) %>% select(row, col) %>%
+        apply(1, paste, collapse="_")
+
+    is_border <- numeric(nrow(target_positions))
+    for(ts_idx in seq_len(nrow(target_positions))){
+        sur_spots_1d <- .surrounding_spots(target_positions[ts_idx,]) %>%
+            apply(1, paste, collapse="_")
+
+        if(any(sur_spots_1d%in%remaining_positions_1d)){
+            is_border[ts_idx] <- 1
+        }
+    }
+
+    slide$border <- 0
+    slide$border[slide$tissue==is_tissue] <- is_border
+    slide$border <- as.factor(slide$border)
+    return(slide)
+}
+
+.surrounding_spots <- function(spot_pos){
+    # Return the row/col positions of the 8 surrounding spots of a given spot position in 10x Visium
+    # Note: It might give invalid spots if input spot is on the edge of the slide
+    # Args:
+    #   pos (vector of int): length two vector telling the row and column of input barcode
+    # Returns:
+    #   (dataframe of int): a 8 by 2 dataframe. Each row is the position of one surrounding spot
+
+    pos_shifts <- rbind(c(-1,-1,0,0,1,1),
+                        c(-1,1,-2,2,-1,1))
+
+    sur_pos <- t(as.numeric(spot_pos)+pos_shifts)
+    colnames(sur_pos) <- c("row", "col")
+
+    return(sur_pos)
+}
+```
+
+```{r, echo=F}
+sample_names <- gsub(".*manual\\/(.*)_manual.*","\\1",rdata_dir)
+
+slide_list <- slide_obj_list <- down_matrix_list <- top1000_list <- list()
+
+for(i in seq_along(rdata_dir)){
+    load(rdata_dir[i])
+    species_refined_tmp <- read.csv(species_refined_dir[i])
+    species_df <- data.frame(barcode=species_refined_tmp$Barcode,
+                             species=species_refined_tmp$species_refined2)
+
+    slide_tmp <- merge(analysis_out$bcs,species_df, by="barcode",all.x=TRUE)
+    slide_tmp$species[is.na(slide_tmp$species)] <- "background"
+    slide_tmp <- find_border(slide_tmp)
+    slide_list[[sample_names[i]]] <- slide_tmp
+    
+    
+    # Remove mixture tissue spots
+    is_mixture <- grepl("mixture_",slide_tmp$species)
+    slide_tmp <- slide_tmp[!is_mixture,]
+    analysis_out$raw_matrix <- analysis_out$raw_matrix[,slide_tmp$barcode]
+    
+    # Remove genes whose average expression in the correct species are lower 
+    # than that in the wrong species
+
+    human_gene <- grepl("GRCh38_",rownames(analysis_out$raw_matrix))
+    human_mat <- analysis_out$raw_matrix[human_gene,]
+    mouse_mat <- analysis_out$raw_matrix[!human_gene,]
+    
+    human_spots <- filter(slide_tmp,species=="human")$barcode
+    mouse_spots <- filter(slide_tmp,species=="mouse")$barcode
+    
+    bad_human_gene <- which(
+        rowMeans(human_mat[,human_spots])<rowMeans(human_mat[,mouse_spots])
+    )
+    bad_mouse_gene <- which(
+        rowMeans(mouse_mat[,mouse_spots])<rowMeans(mouse_mat[,human_spots])
+    )
+    
+    human_mat <- human_mat[-bad_human_gene,]
+    mouse_mat <- mouse_mat[-bad_mouse_gene,]
+    
+    # Downscale mouse genes
+    down_ratio <- sum(human_mat)/sum(mouse_mat)
+    mouse_mat <- mouse_mat*down_ratio
+    
+    # Filter out genes with average expression <0.01
+    mouse_mat <- mouse_mat[rowMeans(mouse_mat)>=0.01,]
+    human_mat <- human_mat[rowMeans(human_mat)>=0.01,]
+    
+    down_mat <- rbind(mouse_mat,human_mat)
+    
+    slide_tmp$sum_umi <- colSums(down_mat)
+    slide_tmp$sum_mouse_umi <- colSums(mouse_mat)
+    slide_tmp$sum_human_umi <- colSums(human_mat)
+    
+    slide_obj_list[[sample_names[i]]] <- 
+        CreateSlide(down_mat, 
+                    list(slide=slide_tmp,
+                         grob=analysis_out$images_tibble$grob[[1]]),gene_cutoff = 0)
+    
+}
+
+# sort human and mouse genes separately
+top1000_list <- list()
+for(dset in names(slide_obj_list)){
+    top1000_list[[dset]] <- list()
+    ave_exp <- rowMeans(assay(slide_obj_list[[dset]]))
+    human_gene <- grepl("GRCh38",rownames(slide_obj_list[[dset]]))
+    top1000_list[[dset]]$human <- ave_exp[human_gene] %>% 
+        sort(decreasing=T) %>% head(1000) %>% names
+    top1000_list[[dset]]$mouse <- ave_exp[!human_gene] %>% 
+        sort(decreasing=T) %>% head(1000) %>% names
+    
+}
+
+```
+
+
+### Visualize species labels
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=6}
+for(dset in names(slide_obj_list)){
+    cols <- myPalette(7)[c(2,5,7)]
+    names(cols) <- c("human","mixture","mouse")
+    
+    slide_tmp <- slide_list[[dset]]
+    slide_tmp$species[grepl("mixture_",slide_tmp$species)] <- "mixture"
+    
+    # tiff(file.path(tif_dir,paste0(dset,"_species.tif")),
+    #      width = 5.3, height = 4.8,units = "in",res = 300)
+    dp <- VisualizeLabel(slide_tmp,"species",title=NULL,
+                         subset_barcodes = filter(slide_list[[dset]],tissue==1)$barcode)+
+        scale_fill_manual(values=cols)+.theme_void()
+    plot(dp)
+    # dev.off()
+}
+```
+
+### Visualize human and mouse counts across slide
+
+```{r, echo=F, dpi=300, fig.width=5, fig.height=4}
+for(dset in names(slide_obj_list)){
+    
+    inner_bcs <- filter(slide_obj_list[[dset]]@metadata$slide,
+                      border==0)$barcode
+    
+    # tiff(file.path(tif_dir,paste0(dset,"_human_counts_l.tif")),
+    #      width = 5, height = 4.8,units = "in",res = 300)
+    dp <- VisualizeHeatmap(slide_obj_list[[dset]],"sum_human_umi",title=NULL, 
+                           legend_title = "total human UMIs",
+                           subset_barcodes = inner_bcs,
+                           viridis = F)#+.theme_void()
+
+    plot(dp)
+    # dev.off()
+    
+    # tiff(file.path(tif_dir,paste0(dset,"_mouse_counts_l.tif")),
+    #      width = 5, height = 4.8,units = "in",res = 300)
+    dp <- VisualizeHeatmap(slide_obj_list[[dset]],"sum_mouse_umi",title=NULL,
+                           legend_title = "total mouse UMIs",
+                           subset_barcodes = inner_bcs,
+                           viridis = F)#+.theme_void()
+
+    plot(dp)
+    # dev.off()
+}
+```
+
+
+### Check proportion of human and mouse UMI counts in each spot
+
+```{r, echo=F}
+spot_prop_list <- gene_prop_list <- list()
+
+wrong_prop <- matrix(0, 2, length(slide_obj_list))
+rownames(wrong_prop) <- c("human","mouse")
+colnames(wrong_prop) <- names(slide_obj_list)
+
+LPSS <- BG <- numeric(length(slide_obj_list))
+names(LPSS) <- names(BG) <- names(slide_obj_list)
+
+for(dset in names(slide_obj_list)){
+    
+    #for raw data
+    human_gene <- grepl("GRCh38",rownames(slide_obj_list[[dset]]))
+    
+    raw_mat <- assay(slide_obj_list[[dset]])
+    slide_tmp <- metadata(slide_obj_list[[dset]])$slide
+    
+    human_spots <- filter(slide_tmp,species=="human")$barcode
+    mouse_spots <- filter(slide_tmp,species=="mouse")$barcode
+    
+    # proportion of human and mouse UMIs in each spot
+    spot_human_prop <- slide_tmp$sum_human_umi/slide_tmp$sum_umi
+    spot_human_prop2 <- slide_tmp$sum_human_umi/sum(raw_mat)
+    spot_mouse_prop2 <- slide_tmp$sum_mouse_umi/sum(raw_mat)
+    
+    spot_wrong_prop <- numeric(nrow(slide_tmp))
+    spot_wrong_prop[slide_tmp$species=="background"] <- 1
+    spot_wrong_prop[slide_tmp$species=="human"] <- 1-spot_human_prop[slide_tmp$species=="human"]
+    spot_wrong_prop[slide_tmp$species=="mouse"] <- spot_human_prop[slide_tmp$species=="mouse"]
+    
+    # LPSS per-spot
+    # Human spot: mouse UMIs / total UMIs
+    # Mouse spot: human UMIs / total UMIs
+    # Background spot: all UMIs / total UMIs
+    lpss <- numeric(nrow(slide_tmp))
+    lpss[slide_tmp$species=="background"] <- slide_tmp$sum_umi[slide_tmp$species=="background"]/sum(raw_mat)
+    lpss[slide_tmp$species=="human"] <- slide_tmp$sum_mouse_umi[slide_tmp$species=="human"]/sum(raw_mat)
+    lpss[slide_tmp$species=="mouse"] <- slide_tmp$sum_human_umi[slide_tmp$species=="mouse"]/sum(raw_mat)
+    
+    
+    spot_prop_list[[dset]] <- 
+        data.frame(barcode=slide_tmp$barcode,
+                   species=slide_tmp$species,
+                   total_counts=slide_tmp$sum_umi,
+                   human_counts=slide_tmp$sum_human_umi,
+                   mouse_counts=slide_tmp$sum_mouse_umi,
+                   human_prop=spot_human_prop,
+                   mouse_prop=1-spot_human_prop,
+                   human_prop2=spot_human_prop2,
+                   mouse_prop2=spot_mouse_prop2,
+                   lpss=lpss,
+                   wrong_prop=spot_wrong_prop)
+    
+    
+    # proportion of UMIs in human spots for each gene
+    gene_human_prop <- rowSums(raw_mat[,human_spots])/rowSums(raw_mat)
+    
+    # proportion of UMIs in mouse spots for each gene
+    gene_mouse_prop <- rowSums(raw_mat[,mouse_spots])/rowSums(raw_mat)
+    
+    gene_prop_list[[dset]] <- data.frame(gene=rownames(raw_mat),
+                                         ave_exp=rowMeans(raw_mat),
+                                         species=ifelse(human_gene,"human","mouse"),
+                                         human_prop=gene_human_prop,
+                                         mouse_prop=gene_mouse_prop)
+    
+    wrong_prop[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
+        sum(raw_mat[human_gene,])
+    wrong_prop[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
+        sum(raw_mat[!human_gene,])
+    
+    wrong_prop2[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
+        sum(raw_mat[human_gene,c(human_spots,mouse_spots)])
+    wrong_prop2[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
+        sum(raw_mat[!human_gene,c(human_spots,mouse_spots)])
+    
+    LPSS[dset] <- (sum(raw_mat[human_gene,slide_tmp$species%in%c("mouse","background")])+
+        sum(raw_mat[!human_gene,slide_tmp$species%in%c("human","background")]))/sum(raw_mat)
+    
+    BG[dset] <- sum(raw_mat[,slide_tmp$tissue==0])/sum(raw_mat)
+}
+
+# LPSS
+round(LPSS,3)
+
+# Proportion of background UMIs
+round(BG,3)
+```
+
+
+Species-specific proportions in spots in raw data:
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=3}
+gp_list <- lpss_list <- list()
+for(dset in names(slide_obj_list)){
+    
+    prop_df <- spot_prop_list[[dset]] %>% filter(species%in%c("human","mouse","background")) %>%
+        melt(id.vars="species", measure.vars=c("human_prop","mouse_prop"))
+    # prop_df <- spot_prop_list[[dset]] %>% #filter(species%in%c("human","mouse")) %>%
+    #     melt(id.vars="species", measure.vars=c("human_prop2","mouse_prop2"))
+    prop_df$hm_in_region <- paste(prop_df$variable, prop_df$species,sep = "_")
+    
+    
+    
+    gp <- ggplot(prop_df, aes(y=value, color=hm_in_region))+
+        geom_boxplot()+ylab("Proportion")+ 
+        ylim(c(0,1))+
+        # ylim(c(0,2e-3))+
+        theme_bw()+
+        ggtitle(NULL)+
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              panel.grid.major.x = element_blank(), 
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"),legend.position = "none")
+    
+    gp_list[[dset]] <- gp
+    
+    
+    prop_df <- spot_prop_list[[dset]] %>% filter(species%in%c("human","mouse","background")) %>% 
+        select(species,lpss)
+    
+    gp <- ggplot(prop_df, aes(y=lpss, color=species))+
+        geom_boxplot()+labs(y="LPSS",color="spots")+theme_bw()+ylim(c(0,5e-4))+
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"))+ggtitle(dset)
+    
+    lpss_list[[dset]] <- gp
+
+}
+# tiff(file.path(tif_dir,"MS_down_hmprop_nol.tif"),
+#      res = 300, units = "in", width = 10,height = 3)
+plot_grid(plotlist = gp_list[c(2,1,3)], align = "vh", ncol=3)
+# plot_grid(plotlist = lpss_list[c(2,1,3)], align = "vh", ncol=3)
+# dev.off()
+```
+
+### Run decontamination
+
+Due to low expression, set a smaller tolerance.
+
+```{r, echo=F, eval=F}
+decont_obj_list <- list()
+
+for(dset in names(slide_obj_list)){
+    decont_obj_list[[dset]] <- SpotClean(slide_obj_list[[dset]],
+                                         gene_keep = rownames(slide_obj_list[[dset]]),tol = 0.1)
+}
+
+save(decont_obj_list, file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/mixed_species_decont_down.RData")
+
+```
+
+### Calculate summary statistics after decontamination
+
+```{r, echo=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/mixed_species_decont_down.RData")
+tissue_spot_prop_list <- lapply(spot_prop_list, function(x) filter(x, species!="background"))
+
+wrong_prop_decont <- wrong_prop
+
+for(dset in names(decont_obj_list)){
+    decont_mat <- assay(decont_obj_list[[dset]])
+    slide_tmp <- metadata(slide_obj_list[[dset]])$slide %>% filter(tissue==1)
+    
+    human_gene <- grepl("GRCh38",rownames(decont_mat))
+    
+    spot_human_umi <- colSums(decont_mat[human_gene,])
+    spot_mouse_umi <- colSums(decont_mat[!human_gene,])
+    
+    spot_human_prop <- spot_human_umi/(spot_human_umi+spot_mouse_umi)
+    spot_human_prop2 <- spot_human_umi/sum(decont_mat)
+    spot_mouse_prop2 <- spot_mouse_umi/sum(decont_mat)
+    
+    tissue_spot_prop_list[[dset]]$decont_human_counts <- spot_human_umi
+    tissue_spot_prop_list[[dset]]$decont_mouse_counts <- spot_mouse_umi
+    
+    tissue_spot_prop_list[[dset]]$decont_human_prop <- spot_human_prop
+    tissue_spot_prop_list[[dset]]$decont_mouse_prop <- 1-spot_human_prop
+    
+    tissue_spot_prop_list[[dset]]$decont_human_prop2 <- spot_human_prop2
+    tissue_spot_prop_list[[dset]]$decont_mouse_prop2 <- spot_mouse_prop2
+    
+    gene_prop_list[[dset]]$decont_wrong_prop <- 
+        gene_prop_list[[dset]]$wrong_prop <- NA
+    
+    h_spots <- tissue_spot_prop_list[[dset]]$species=="human"
+    m_spots <- tissue_spot_prop_list[[dset]]$species=="mouse"
+    
+    # estimated contamination rates
+    tissue_spot_prop_list[[dset]]$cont_rate <- metadata(decont_obj_list[[dset]])$contamination_rate
+    
+    # Per-spot LPSS after decontamination
+    lpss <- numeric(nrow(slide_tmp))
+    lpss[h_spots] <- colSums(decont_mat[!human_gene,h_spots])/sum(decont_mat)
+    lpss[m_spots] <- colSums(decont_mat[human_gene,m_spots])/sum(decont_mat)
+
+    tissue_spot_prop_list[[dset]]$decont_lpss <- lpss
+    
+    # proportion of UMIs in human spots for each gene
+    gene_human_prop <- rowSums(decont_mat[,h_spots])/rowSums(decont_mat)
+    
+    # proportion of UMIs in mouse spots for each gene
+    gene_mouse_prop <- rowSums(decont_mat[,m_spots])/rowSums(decont_mat)
+    
+    gene_prop_list[[dset]]$decont_human_prop <- gene_human_prop
+    gene_prop_list[[dset]]$decont_mouse_prop <- gene_mouse_prop
+    
+    wrong_prop_decont[1,dset] <- sum(decont_mat[human_gene,m_spots])/
+        sum(decont_mat[human_gene,])
+    wrong_prop_decont[2,dset] <- sum(decont_mat[!human_gene,h_spots])/
+        sum(decont_mat[!human_gene,])
+    
+    # wrong prop per gene
+    gene_prop_list[[dset]]$decont_wrong_prop[ human_gene] <- 
+        1- gene_prop_list[[dset]]$decont_human_prop[ human_gene]
+    gene_prop_list[[dset]]$decont_wrong_prop[!human_gene] <- 
+        1-gene_prop_list[[dset]]$decont_mouse_prop[! human_gene]
+    
+    gene_prop_list[[dset]]$wrong_prop[ human_gene] <- 
+        1-gene_prop_list[[dset]]$human_prop[ human_gene]
+    gene_prop_list[[dset]]$wrong_prop[! human_gene] <- 
+        1-gene_prop_list[[dset]]$mouse_prop[! human_gene]
+}
+
+wrong_prop %>% round(3)
+wrong_prop_decont %>% round(3)
+
+total_df <- data.frame(species=rep(c("human","mouse"),2),method=rep(c("raw","SpotClean"),each=2),val=c(wrong_prop[,2],wrong_prop_decont[,2]))
+# tiff(file.path(tif_dir,"MS_1_wrong_prop.tif"),units = "in", res = 300, width = 2,height = 3.3)
+ggplot(total_df, aes(x=species,y=val,group=method, fill=method))+geom_bar(stat="identity",position = "dodge")+
+    labs(fill=NULL, y="proportion of spot-swapped UMIs")+
+    theme(axis.text.x=element_blank(),
+          axis.title.x=element_blank(),
+          axis.ticks.x = element_blank(),
+          panel.grid = element_blank(),legend.position = "top")
+# dev.off()
+```
+
+### Species-specific proportions in spots in decont data
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=3}
+gp_list <- lpss_list <- list()
+for(dset in names(slide_obj_list)){
+    
+    prop_df <- tissue_spot_prop_list[[dset]] %>% filter(species%in%c("human","mouse")) %>%
+        melt(id.vars="species", measure.vars=c("decont_human_prop","decont_mouse_prop"))
+
+    prop_df$hm_in_region <- paste(prop_df$variable, prop_df$species,sep = "_")
+    
+    gp <- ggplot(prop_df, aes(y=value, color=hm_in_region))+
+        geom_boxplot()+ylab("Proportion")+ 
+        ylim(c(0,2e-3))+
+        theme_bw()+
+        ggtitle(dset)+
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"))
+    
+    gp_list[[dset]] <- gp
+    
+    gp <- ggplot(tissue_spot_prop_list[[dset]], aes(y=lpss, color=species))+
+        geom_boxplot()+labs(y="LPSS",color="spots")+theme_bw()+ylim(c(0,5e-4))+
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"))+ggtitle(dset)
+    
+    lpss_list[[dset]] <- gp
+    
+}
+
+# tiff(file.path(tif_dir,"MS_raw_hmprop_l.tif"),
+#      res = 300, units = "in", width = 10,height = 3)
+plot_grid(plotlist = gp_list[c(2,1,3)], align = "vh", ncol=3)
+# dev.off()
+```
+
+### Plot spot and gene proportions (species purity) in top human and mouse spots and genes
+
+```{r, echo=F, dpi=300, fig.width=14, fig.height=5}
+s_top_n <- 100
+g_top_n <- 100
+
+for(dset in names(slide_obj_list)){
+    
+    ###################
+    # genes
+    ##################
+    
+    human_top <- gene_prop_list[[dset]] %>% filter(species=="human") %>% 
+        arrange(-ave_exp) %>% head(g_top_n)
+
+    mouse_top <- gene_prop_list[[dset]] %>% filter(species=="mouse") %>% 
+        arrange(-ave_exp) %>% head(g_top_n)
+    
+    h_range <- range(1-human_top$human_prop,1-human_top$decont_human_prop)
+    m_range <- range(1-mouse_top$mouse_prop,1-mouse_top$decont_mouse_prop)
+    
+    g1 <- ggplot(human_top %>% filter(species=="human"), 
+                 aes(x=1-human_prop, y=1-decont_human_prop))+
+        geom_abline(slope = 1, color="pink",size=1)+
+        geom_point()+lims(x=h_range,
+                          y=h_range)+theme_bw(base_rect_size = 2)+
+        labs(#title=paste0(dset,": top 100 human genes"),
+             x="raw\n",
+             y="\nSpotClean")+
+        theme(axis.title = element_text(size = 20),
+              axis.text = element_text(size=15),
+              panel.grid.minor = element_blank(),
+              plot.margin = margin(t=0.1,r = 0.2, unit = "in"))
+    
+    g2 <- ggplot(mouse_top %>% filter(species=="mouse"), 
+                 aes(x=1-mouse_prop, y=1-decont_mouse_prop))+
+        geom_abline(slope = 1, color="pink",size=1)+
+        geom_point()+lims(x=m_range,
+                          y=m_range)+theme_bw(base_rect_size = 2)+
+        labs(#title=paste0(dset,": top 100 mouse genes"),
+             x="raw\n",
+             y="\nSpotClean")+
+        theme(axis.title = element_text(size = 20),
+              axis.text = element_text(size=15),
+              panel.grid.minor = element_blank(),
+              plot.margin = margin(t=0.1,r = 0.2, unit = "in"))
+    
+    
+    ###################
+    # spots
+    ###################
+    
+    human_top <- tissue_spot_prop_list[[dset]] %>% filter(species=="human") %>% 
+        arrange(-decont_human_counts) %>% head(s_top_n)
+    
+    mouse_top <- tissue_spot_prop_list[[dset]] %>% filter(species=="mouse") %>% 
+        arrange(-decont_human_counts) %>% head(s_top_n)
+    
+    h_range <- range(1-human_top$human_prop,1-human_top$decont_human_prop)
+    m_range <- range(1-mouse_top$mouse_prop,1-mouse_top$decont_mouse_prop)
+    
+    s1 <- ggplot(human_top, 
+                 aes(x=1-human_prop, y=1-decont_human_prop))+
+        geom_abline(slope = 1, color="pink",size=1)+
+        geom_point()+lims(x=h_range,
+                          y=h_range)+theme_bw(base_rect_size = 2)+
+        labs(#title=paste0(dset,": top 100 human spots"),
+             x="raw\n",
+             y="\nSpotClean")+
+        theme(axis.title = element_text(size = 20),
+              axis.text = element_text(size=15),
+              panel.grid.minor = element_blank(),
+              plot.margin = margin(t=0.1,r = 0.2, unit = "in"))
+    
+    s2 <- ggplot(mouse_top, 
+                 aes(x=1-mouse_prop, y=1-decont_mouse_prop))+
+        geom_abline(slope = 1, color="pink",size=1)+
+        geom_point()+lims(x=m_range,
+                          y=m_range)+theme_bw(base_rect_size = 2)+
+        labs(#title=paste0(dset,": top 100 mouse spots"),
+             x="raw\n",
+             y="\nSpotClean")+
+        theme(axis.title = element_text(size = 20),
+              axis.text = element_text(size=15),
+              panel.grid.minor = element_blank(),
+              plot.margin = margin(t=0.1,r = 0.2, unit = "in"))
+    
+    tiff(file.path(tif_dir,paste0(dset,"_",g_top_n,"g",s_top_n,"s_wrongprop.tif")),res = 300,
+         width = 8, height = 7, units = "in")
+    plot(plot_grid(g1, g2, s1, s2, align = "vh", ncol = 2))
+    dev.off()
+
+}
+
+
+```
+
+Why small spots look not good: for small spots, the proportion is not necessarily improved even correctly decontaminated.
+
+Example: an empty human spot received the same amount of human and mouse contamination. After decontamination, more human contamination was removed than mouse contamination. As a result, both human and mouse contamination were reduced, but human proportion (species purity) decreased.
+
+Why large spots are better: large spots are unlikely to be empty spots, and its majority expression comes from the correct species. After decontamination, it will receive expression of the correct species and lose expression of the wrong species, thus improves species purity.
+
+Why large genes are preferred: lowly expressed genes are sparse. SpotClean does not change too much of sparse genes.
+
+### Plot wrong prop in human and mouse genes before and after decontamination
+
+```{r, echo=F}
+g_top_n <- 5000
+
+for(dset in names(slide_obj_list)){
+    
+    human_top <- gene_prop_list[[dset]] %>% filter(species=="human") %>% 
+        arrange(-ave_exp) %>% head(g_top_n)
+    
+    mouse_top <- gene_prop_list[[dset]] %>% filter(species=="mouse") %>% 
+        arrange(-ave_exp) %>% head(g_top_n)
+    
+    plot(ggplot(rbind(human_top, mouse_top),
+           aes(x=wrong_prop, y=decont_wrong_prop, color=species))+
+        geom_point()+
+        geom_abline(slope = 1, color="pink"))
+    
+}
+
+```
+
+### For top 100 human (mouse) spots, check gene expression distributions
+
+Check top 20 human and top 20 mouse gene expression before and after decontamination. These selected genes are top among the whole data, not just in these spots.
+
+For better visualization, the largest proportions in the heatmaps were trimmed to 80% quantile.
+
+```{r, echo=F}
+g_top_n <- 100
+s_top_n <- 100
+
+spot_exp_list <- list()
+
+for(dset in names(slide_obj_list)){
+    # raw and decont matrix
+    mat_list <- list(raw=assay(slide_obj_list[[dset]])[
+        ,metadata(slide_obj_list[[dset]])$slide$tissue==1
+    ],
+    decont=assay(decont_obj_list[[dset]])
+    )
+    
+    slide_tmp <- decont_obj_list[[dset]]@metadata$slide
+    
+    human_s <- colSums(
+        mat_list$decont[,filter(slide_tmp,species=="human")$barcode]
+    ) %>% sort(decreasing = T) %>% head(s_top_n) %>% names
+    mouse_s <- colSums(
+        mat_list$decont[,filter(slide_tmp,species=="mouse")$barcode]
+    ) %>% sort(decreasing = T) %>% head(s_top_n) %>% names
+    
+    human_g <- rowSums(
+        mat_list$decont[grepl("GRCh38",rownames(mat_list$decont)),]
+    ) %>% sort(decreasing = T) %>% head(g_top_n) %>% names
+    mouse_g <- rowSums(
+        mat_list$decont[!grepl("GRCh38",rownames(mat_list$decont)),]
+    ) %>% sort(decreasing = T) %>% head(g_top_n) %>% names
+    
+    # reorder spots by hierarchical clustering
+    hc <- hclust(as.dist(1-cor(as.matrix(mat_list$decont[,human_s]))))
+    human_s <- hc$labels[hc$order]
+    
+    hc <- hclust(as.dist(1-cor(as.matrix(mat_list$decont[,mouse_s]))))
+    mouse_s <- hc$labels[hc$order]
+    
+    # calculate proportions
+    spot_exp_list[[dset]] <- list()
+    for(meth in names(mat_list)){
+        
+        spot_exp_list[[dset]][[meth]] <- (
+            (mat_list[[meth]][,c(human_s,mouse_s)])/
+                rowSums(mat_list[[meth]][,c(human_s,mouse_s)])
+        )[c(human_g,mouse_g),]*1e4
+    }
+}
+
+```
+
+```{r, echo=F, dpi=300, fig.width=8, fig.height=3}
+myPalette <- grDevices::colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+log_idx <- log(1:100)/sum(log(1:100))
+log_idx <- round(log_idx/max(log_idx)*1000)+1
+cols <- myPalette(100)
+
+# truncate top 80% for better visualization
+q_trim <- 0.8
+dp_list <- list()
+for(dset in names(slide_obj_list)){
+    
+    # color scale range
+    max_prop <- lapply(spot_exp_list[[dset]], function(x) quantile(as.matrix(x), q_trim)) %>% unlist %>% max
+    min_prop <- min(spot_exp_list[[dset]]$raw@x,spot_exp_list[[dset]]$decont@x)
+    
+    breaks <- expm1(log1p(min_prop)+ (log1p(max_prop)-log1p(min_prop))/4*0:4 )    
+    
+    dp_tmp <- list()
+    for(meth in c("raw","decont")){
+        
+        exp_df <- melt(spot_exp_list[[dset]][[meth]] %>% as.matrix,varnames=c("gene","barcode"))
+        exp_df$value <- pmin(exp_df$value,quantile(exp_df$value,q_trim))
+        
+        gp <- ggplot(exp_df,aes(x=barcode, y=gene, fill=value))+geom_tile()+
+            scale_fill_gradientn(colours = cols,limits=c(0,max_prop), trans="log1p", 
+                                 breaks=floor(breaks),labels=floor(breaks)/1e4)+
+            theme(axis.text = element_blank(),
+                  axis.ticks = element_blank(),
+                  axis.title = element_blank())+
+            labs(fill="scaled UMIs")+
+            geom_vline(xintercept = s_top_n+0.5)+
+            geom_hline(yintercept = g_top_n+0.5)
+        
+        dp_list[[paste(meth,dset)]] <- gp
+        dp_tmp[[meth]] <- gp
+    }
+
+    # tiff(file.path(tif_dir,paste0(dset,"_",g_top_n,"g",s_top_n,"s","_heatmap.tif")),
+    #      res = 300, units = "in",width = 6, height = 2.8)
+    plot(plot_grid(plotlist = dp_tmp, ncol = 2, align = "vh"))
+    # dev.off()
+}
+
+```
+
+### Visualize top 5 expressed genes
+
+For better visualization, expressions less than 1 were trimmed out.
+
+Mouse genes in all spots: 
+
+```{r, echo=F, dpi=300, fig.width=11, fig.height=4, warning=F}
+top_n <- 5
+for(dset in names(slide_obj_list)){
+
+    slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+    hm_bcs <- filter(slide_tmp, species%in%c("human","mouse"))$barcode
+    genes <- top1000_list[[dset]]$mouse[seq_len(top_n)]
+    
+    dp_list <- list()
+    for(gn in genes){
+        
+        target_range <- c(1,max(assay(decont_obj_list[[dset]])[gn,hm_bcs]))
+        
+        dp1 <- VisualizeHeatmap(slide_obj_list[[dset]],gn, title = NULL, 
+                                subset_barcodes = hm_bcs,
+                                legend_title = gsub(".*_","",gn),
+                                legend_range = target_range)+
+            labs(subtitle=m_gene_prop[gn,"mouse_prop"])#+.theme_void()
+        
+        dp2 <- VisualizeHeatmap(decont_obj_list[[dset]],gn, title = NULL, 
+                                subset_barcodes = hm_bcs,
+                                legend_title = gsub(".*_","",gn),
+                                legend_range = target_range)+
+            labs(subtitle=m_gene_prop[gn,"decont_mouse_prop"])#+.theme_void()
+        
+        plot(plot_grid(dp1, dp2, ncol = 2, align = "vh"))
+        
+        dp_list <- c(dp_list,list(dp1, dp2))
+    }
+    
+    #tiff(file.path(tif_dir,paste0(dset,"_mouse_decont_ l.tif")),res = 300, units = "in", width = 11, height = 22)
+    #plot(plot_grid(plotlist = dp_list,  ncol = 2, align = "vh"))
+    #dev.off()
+}
+
+```
+
+Human genes in all spots:
+
+```{r, echo=F, dpi=300, fig.width=11, fig.height=4, warning=F}
+for(dset in names(slide_obj_list)){
+
+    slide_tmp <- metadata(decont_obj_list[[dset]])$slide
+    hm_bcs <- filter(slide_tmp, species%in%c("human","mouse"))$barcode
+    genes <- top1000_list[[dset]]$human[seq_len(top_n)]
+    
+    dp_list <- list()
+    for(gn in genes){
+        
+
+        target_range <- c(1,max(assay(decont_obj_list[[dset]])[gn,hm_bcs]))
+        
+        
+        dp1 <- VisualizeHeatmap(slide_obj_list[[dset]],gn, title = NULL, 
+                                subset_barcodes = hm_bcs,
+                                legend_title = gsub(".*_","",gn),
+                                legend_range = target_range)+.theme_void()
+        
+        dp2 <- VisualizeHeatmap(decont_obj_list[[dset]],gn, title = NULL, 
+                                subset_barcodes = hm_bcs,
+                                legend_title = gsub(".*_","",gn),
+                                legend_range = target_range)+.theme_void()
+        
+        plot(plot_grid(dp1, dp2, ncol = 2, align = "vh"))
+        
+        dp_list <- c(dp_list,list(dp1, dp2))
+    }
+
+    #tiff(file.path(tif_dir,paste0(dset,"_human_decont_nol.tif")),res = 300, units = "in", width = 11, height = 22)
+    # plot(plot_grid(plotlist = dp_list,  ncol = 2, align = "vh"))
+    #dev.off()
+}
+
+```
+

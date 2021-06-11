@@ -1,0 +1,20 @@
+# Send me email (zni25@wisc.edu) if links are dead. My Box account will probably be suspended after I graduate:(
+
+https://uwmadison.box.com/s/oz1g4rcxxtpieht7fel0o6ctetzmbwf3
+
+It contains 
+
+- RData files for reproducing simulation results.
+
+- Manual tissue alignment files and image files as input to Space Ranger for mixed-species data.
+
+- Raw count matrix, spatial information and species labels of mixed-species data.
+
+- Pre-processed data from preliminary investigation pipeline (SupFig2-4), both RData and html report, one folder per dataset. 11 public data plus 3 mixed species data.
+
+- RData files for reproducing the analyses of mixed-species data
+
+- RData files for reproducing the analyses of SpatialLIBD data
+
+Zijian Ni
+06/05/2021

@@ -1,0 +1,410 @@
+---
+output: html_document
+title: "Codes for manually selecting regions for density plots"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+---
+
+
+```{r, include=F}
+library(ggplot2)
+library(viridis)
+library(Matrix)
+library(cowplot)
+library(RColorBrewer)
+library(grid)
+library(readbitmap)
+library(dplyr)
+library(SpotClean)
+library(S4Vectors)
+
+SEED <- 2021
+set.seed(SEED)
+
+tif_dir <- c("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots/contamination")
+
+bw_col <- c("#000000","#e9e9e9")
+gw_col <- c("#727272","#e9e9e9")
+ts_col <- c("#FF9DC7","#ca8bb1")
+bg_col <- c("#D8D8D8","#767171")
+names(bw_col) <- c("1","0")
+names(gw_col) <- c("1","0")
+colScale_bw <- scale_fill_manual(values = bw_col)
+colScale_gw <- scale_fill_manual(values = gw_col)
+
+
+.theme_void <- function (base_size = 11, base_family = "", base_line_size = base_size/22, 
+    base_rect_size = base_size/22) 
+{
+    half_line <- base_size/2
+    t <- theme(line = element_blank(), rect = element_blank(), 
+        text = element_text(family = base_family, face = "plain", 
+            colour = "black", size = base_size, lineheight = 0.9, 
+            hjust = 0.5, vjust = 0.5, angle = 0, margin = margin(), 
+            debug = FALSE), axis.text = element_blank(), axis.title = element_blank(), 
+        axis.ticks.length = unit(0, "pt"), axis.ticks.length.x = NULL, 
+        axis.ticks.length.x.top = NULL, axis.ticks.length.x.bottom = NULL, 
+        axis.ticks.length.y = NULL, axis.ticks.length.y.left = NULL, 
+        axis.ticks.length.y.right = NULL, legend.box = NULL, 
+        legend.position = "none", 
+        strip.text = element_text(size = rel(0.8)), strip.switch.pad.grid = unit(half_line/2, 
+            "pt"), strip.switch.pad.wrap = unit(half_line/2, 
+            "pt"), panel.ontop = FALSE, panel.spacing = unit(half_line, 
+            "pt"), plot.margin = unit(c(0, 0, 0, 0), "lines"), 
+        plot.title = element_text(size = rel(1.2), hjust = 0, 
+            vjust = 1, margin = margin(t = half_line)), plot.title.position = "panel", 
+        plot.subtitle = element_text(hjust = 0, vjust = 1, margin = margin(t = half_line)), 
+        plot.caption = element_text(size = rel(0.8), hjust = 1, 
+            vjust = 1, margin = margin(t = half_line)), plot.caption.position = "panel", 
+        plot.tag = element_text(size = rel(1.2), hjust = 0.5, 
+            vjust = 0.5), plot.tag.position = "topleft", 
+        complete = TRUE)
+    ggplot2:::ggplot_global$theme_all_null %+replace% t 
+}
+
+find_border <- function(slide, is_tissue=TRUE){
+    # Find border spots. i.e. tissue spots adjacent to background spots, or
+    # background spots adjacent to tissue spots.
+    # Args:
+    #   slide (dataframe): the slide data frame
+    #   is_tissue (logical): whether return tissue border or background border
+    # Returns:
+    #   (dataframe) slide dataframe with additional column indicating
+    #       border (1) or not (0)
+    is_tissue <- as.integer(is_tissue)
+    target_positions <- slide %>% filter(tissue==is_tissue) %>% select(row, col)
+    remaining_positions_1d <- slide %>% filter(tissue==(1-is_tissue)) %>% select(row, col) %>%
+        apply(1, paste, collapse="_")
+
+    is_border <- numeric(nrow(target_positions))
+    for(ts_idx in seq_len(nrow(target_positions))){
+        sur_spots_1d <- .surrounding_spots(target_positions[ts_idx,]) %>%
+            apply(1, paste, collapse="_")
+
+        if(any(sur_spots_1d%in%remaining_positions_1d)){
+            is_border[ts_idx] <- 1
+        }
+    }
+
+    slide$border <- 0
+    slide$border[slide$tissue==is_tissue] <- is_border
+    slide$border <- as.factor(slide$border)
+    return(slide)
+}
+
+.surrounding_spots <- function(spot_pos){
+    # Return the row/col positions of the 8 surrounding spots of a given spot position in 10x Visium
+    # Note: It might give invalid spots if input spot is on the edge of the slide
+    # Args:
+    #   pos (vector of int): length two vector telling the row and column of input barcode
+    # Returns:
+    #   (dataframe of int): a 8 by 2 dataframe. Each row is the position of one surrounding spot
+
+    pos_shifts <- rbind(c(-1,-1,0,0,1,1),
+                        c(-1,1,-2,2,-1,1))
+
+    sur_pos <- t(as.numeric(spot_pos)+pos_shifts)
+    colnames(sur_pos) <- c("row", "col")
+
+    return(sur_pos)
+}
+
+visualize_slide <- function(slide,
+                            col_name="true_exp",
+                            data_matrix=NULL,
+                            data_vec=NULL,
+                            legend_range=NULL,
+                            logged=TRUE,
+                            viridis=TRUE,
+                            highlight_tissue=FALSE,
+                            highlight_spots=NULL,
+                            title=""){
+    # Visualize spatial slide in 2D, colored by continuous columns
+    # Args:
+    #   slide (dataframe): Simulated slide
+    #   col_name (chr): the column name to color spots
+    #   data_matrix (matrix of num): expression matrix corresponding to the slide. If
+    #       NULL, then col_name must be one column in the slide. Otherwise col_name can be
+    #       a gene name in data_matrix.
+    #   logged (logical): whether perform log transformation
+    #   highlight_tissue (logical): whether highlight tissue spots
+    #   highlight_spots (vector of chr): highlight a given set of barcode spots
+    #   title (chr): title of the plot
+    # Returns:
+    #   (ggplot) ggplot object
+    if(!is.null(data_vec)){
+        data_vec <- data_vec[slide$barcode]
+        slide$vis <- data_vec
+    }else if(!is.null(data_matrix)){
+        common_bc <- intersect(slide$barcode,colnames(data_matrix))
+        vis_exp <- data_matrix[col_name,common_bc]
+        vis_all <- numeric(nrow(slide))
+        names(vis_all) <- slide$barcode
+        vis_all[common_bc] <- vis_exp
+
+        # if(!identical(slide$barcode, colnames(data_matrix))){
+        #     data_matrix <- data_matrix[,slide$barcode]
+        # }
+
+        slide$vis <- vis_all
+    }else{
+        slide$vis <- slide[,col_name]
+    }
+
+    scale_fill_fun <- function(viridis=TRUE, ...){
+        if(viridis){
+            return(scale_fill_viridis(...))
+        }else{
+            myPalette <- grDevices::colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+            return(
+                scale_fill_gradientn(colours = myPalette(100), ...)
+            )
+        }
+    }
+
+    # setup legend breaks
+    if(is.null(legend_range)){
+        legend_range <- c(0,max(slide$vis))
+    }
+    if(logged){
+        legend_breaks <- floor(expm1( log1p(min(legend_range))+
+                                          diff(log1p(legend_range))/4*0:4 ))
+    }else{
+        legend_breaks <- floor(min(legend_range))+diff(legend_range)/4*0:4
+    }
+
+    if(highlight_tissue){
+        gp <- ggplot(slide %>% filter(tissue==0 & vis>=min(legend_range)), aes(x = imagecol, y = imagerow, fill = vis)) +
+            geom_point(
+                shape = 21,
+                colour = "white",
+                size = 1.75,
+                alpha=1
+            ) +
+            geom_point(data=slide %>% filter(tissue==1 & vis>=min(legend_range)),
+                shape = 21,
+                colour = "black",
+                size = 1.75,
+                alpha=1
+            )
+    }else if(!is.null(highlight_spots)){
+        gp <- ggplot(slide %>% filter(barcode%in%highlight_spots & vis>=min(legend_range)),
+                     aes(x = imagecol, y = imagerow, fill = vis)) +
+            geom_point(
+                shape = 21,
+                colour = "red",
+                size = 2,
+                alpha=1
+            ) +
+            geom_point(data=slide %>% filter(!barcode%in%highlight_spots & vis>=min(legend_range)),
+                       shape = 21,
+                       colour = "white",
+                       size = 1.75,
+                       alpha=1
+            )
+
+
+    }else{
+        gp <- ggplot(slide %>% filter(vis>=min(legend_range)+1e-10), aes(x = imagecol, y = imagerow, fill = vis)) +
+            geom_point(
+                shape = 21,
+                colour = "white",
+                size = 1.75,
+                alpha=1
+            )
+    }
+    gp <- gp +
+        geom_point(data=slide %>% filter(vis<min(legend_range)+1e-10),
+                   shape = 21,
+                   colour = "white",
+                   fill="#d6d6d6",
+                   size = 1.75,
+                   alpha=0.1
+        ) +
+
+        coord_cartesian(expand = FALSE) +
+        # scale_fill_gradientn(colours = myPalette(100))+
+        scale_fill_fun(viridis=viridis, trans = ifelse(logged,"log1p","identity"),
+                           breaks=legend_breaks, limits=legend_range) +
+        xlim(0, max(slide %>%
+                        select(width))) +
+        ylim(max(slide %>%
+                     select(height)), 0) +
+        xlab("") +
+        ylab("") +
+        ggtitle(title) +
+        labs(fill = col_name) +
+        theme_set(theme_bw(base_size = 10)) +
+        theme(
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.line = element_line(colour = "black"),
+            axis.text = element_blank(),
+            axis.ticks = element_blank()
+        )
+
+    return(gp)
+}
+```
+
+
+```{r, echo=F}
+regions_list <- list(
+    V1_Adult_Mouse_Brain=list(41:45, 15:22, 41:45, 8:15, 71:75, 115:123),
+    V1_Breast_Cancer_Block_A_Section_2=list(66:71, 24:30, 71:75, 24:30, 0:4, 120:128),
+    V1_Mouse_Kidney=list(65:71, 65:75, 71:77, 65:75, 2:8, 12:20),
+    V1_Human_Lymph_Node=list(22:28, 109:118, 22:28, 118:126, 10:16, 1:10),
+    Targeted_Visium_Human_SpinalCord_Neuroscience=list(33:39, 12:22, 33:39, 0:10, 2:8, 115:125),
+    sp_151507=list(55:61, 112:120, 55:61, 120:126, 72:78, 1:9),
+    sp_151508=list(55:61, 112:120, 55:61, 120:126, 72:78, 1:9),
+    sp_151669=list(14:19, 110:118, 8:14, 110:118, 72:80, 63:71),
+    sp_151670=list(17:22, 108:116, 12:17, 108:116, 72:80, 63:71),
+    sp_151673=list(62:68, 44:54, 68:73, 44:54, 70:76, 118:126),
+    sp_151674=list(64:70, 44:54, 70:75, 44:54, 70:76, 118:126),
+    `1_S1_manual`=list(49:53, 96:102, 49:53, 92:98, 0:4, 120:128),
+    `2_S2_manual`=list(49:53, 80:86, 49:53, 86:92, 0:4, 120:128),
+    `3_S3_manual`=list(49:53, 42:48, 49:53, 48:56, 0:4, 120:128)
+)
+
+
+RData_dir <- c("~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Mouse_Kidney/V1_Mouse_Kidney.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Breast_Cancer_Block_A_Section_2/V1_Breast_Cancer_Block_A_Section_2.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Human_Lymph_Node/V1_Human_Lymph_Node.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/Targeted_Visium_Human_SpinalCord_Neuroscience/Targeted_Visium_Human_SpinalCord_Neuroscience.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151507/sp_151507.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151508/sp_151508.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151669/sp_151669.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151670/sp_151670.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151673/sp_151673.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151674/sp_151674.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/1_S1_manual/1_S1_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/2_S2_manual/2_S2_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/3_S3_manual/3_S3_manual.RData")
+
+```
+
+V1_Adult_Mouse_Brain: row%in%41:45, col%in%15:22; row%in%41:45, col%in%8:15; row%in%71:75, col%in%115:123
+
+V1_Breast_Cancer_Block_A_Section_2: row%in%66:71, col%in%24:30; row%in%71:75, col%in%24:30; row%in%0:4, col%in%120:128
+
+V1_Mouse_Kidney: row%in%65:71, col%in%65:75; row%in%71:77, col%in%65:75; row%in%2:8, col%in%12:20
+
+V1_Human_Lymph_Node: row%in%35:41, col%in%12:22; row%in%30:36, col%in%1:10; row%in%2:8, col%in%121:130
+
+Targeted_Visium_Human_SpinalCord_Neuroscience: row%in%33:39, col%in%12:22; row%in%33:39, col%in%0:10; row%in%2:8, col%in%115:125
+
+V1_Mouse_Brain_Sagittal_Anterior: row%in%27:33, col%in%107:115; row%in%27:33, col%in%115:123; row%in%2:8, col%in%5:13
+
+sp_151507: row%in%61:67, col%in%25:33; row%in%67:73, col%in%21:29; row%in%69:76, col%in%116:126
+
+sp_151508: row%in%61:67, col%in%23:31; row%in%67:73, col%in%19:27; row%in%73:80, col%in%118:130
+
+sp_151669: row%in%14:19, col%in%110:118; row%in%8:14, col%in%110:118; row%in%72:80, col%in%63:71
+
+sp_151670: row%in%17:22, col%in%108:116; row%in%12:17, col%in%108:116; row%in%72:80, col%in%63:71
+
+sp_151673: row%in%68:74, col%in%34:44; row%in%68:74, col%in%26:34; row%in%70:76, col%in%118:126
+
+sp_151674: row%in%70:76, col%in%34:44; row%in%70:76, col%in%26:34; row%in%0:6, col%in%120:128
+
+1_S1_manual: row%in%49:53, col%in%96:102; row%in%49:53, col%in%92:98; row%in%0:4, col%in%120:128
+
+2_S2_manual: row%in%49:53, col%in%80:86; row%in%49:53, col%in%86:92; row%in%0:4, col%in%120:128
+
+3_S3_manual: row%in%49:53, col%in%42:48; row%in%49:53, col%in%48:56; row%in%0:4, col%in%120:128
+
+
+#### Pick regions: tissue, nearby background, distant background
+
+Plot top 50 genes in selected tissue region. Y-axis is log-scaled raw counts.
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=4.5}
+for(rdata_dir in RData_dir){
+    
+    load(rdata_dir)
+    
+    analysis_out$bcs <- find_border(analysis_out$bcs)
+    
+    slide_info <- list(slide=analysis_out$bcs)
+    if(!is.null(analysis_out$images_tibble)){
+        slide_info$grob <- analysis_out$images_tibble$grob[[1]]
+    }
+    raw_obj <- CreateSlide(analysis_out$raw_matrix,
+                           slide_info,
+                           gene_cutoff = 0)
+    
+    
+    region_tmp <- regions_list[[analysis_out$sample_name]]
+    bcs_ts <- filter(analysis_out$bcs,row%in%region_tmp[[1]], col%in%region_tmp[[2]],tissue==1, border==0)$barcode
+    bcs_bg1 <- filter(analysis_out$bcs,row%in%region_tmp[[3]], col%in%region_tmp[[4]],tissue==0)$barcode
+    bcs_bg2 <- filter(analysis_out$bcs,row%in%region_tmp[[5]], col%in%region_tmp[[6]],tissue==0)$barcode
+
+    # bcs_ts <- filter(analysis_out$bcs,row%in%64:70, col%in%44:54,tissue==1, border==0)$barcode
+    # bcs_bg1 <- filter(analysis_out$bcs,row%in%70:75, col%in%44:54,tissue==0)$barcode
+    # bcs_bg2 <- filter(analysis_out$bcs,row%in%70:76, col%in%118:126,tissue==0)$barcode
+
+    gp1 <- visualize_slide(analysis_out$bcs,"sum_umi",highlight_spots = c(bcs_ts, bcs_bg1, bcs_bg2))+theme_nothing()
+    gp2 <- visualize_slide(analysis_out$bcs,"sum_umi",highlight_tissue = T)+theme_nothing()
+    #fname <- file.path(tif_dir,paste0(analysis_out$sample_name,"_regions.tif"))
+    #tiff(fname, width = 10, height =4,units = "in",res = 100)
+    plot(plot_grid(gp1, gp2, ncol = 2, align = "vh"))
+    #dev.off()
+
+    
+    top50 <- rowSums(analysis_out$raw_matrix[,bcs_ts]) %>% sort(decreasing = T) %>% head(50) %>% names
+    
+    ts_ct <- rowMeans(analysis_out$raw_matrix[,bcs_ts])[top50]
+    bg1_ct <- rowMeans(analysis_out$raw_matrix[,bcs_bg1])[top50]
+    bg2_ct <- rowMeans(analysis_out$raw_matrix[,bcs_bg2])[top50]
+    
+    ct_df <- data.frame(gene=factor(top50, levels = top50),
+                            ts=ts_ct, bg1=bg1_ct, bg2=bg2_ct)
+    
+    gp1 <- ggplot(ct_df, aes(x=gene, y=ts))+geom_bar(stat="identity", fill=ts_col[1])+theme_classic()+
+        theme(axis.text.x = element_blank(),
+              axis.text.y = element_text(size = 13),
+              axis.title = element_blank(),
+              axis.ticks.x = element_blank(),
+              panel.grid = element_blank(),
+              axis.line.y = element_line(size=1),
+              axis.line.x = element_line(size=1))+
+        scale_y_continuous(limits = c(0,max(ct_df[,-1])),trans = "log1p",
+                           breaks = floor(expm1(max(log1p(round(ct_df[,-1])))/4*0:4 )))
+    
+    gp2 <- ggplot(ct_df, aes(x=gene, y=bg1))+geom_bar(stat="identity", fill=bg_col[2])+theme_classic()+
+        theme(axis.text.x = element_blank(),
+              axis.text.y = element_text(size = 13),
+              axis.title.x = element_blank(),
+              axis.title.y=element_text(size = 25),
+              axis.ticks.x = element_blank(),
+              panel.grid = element_blank(),
+              axis.line.y = element_line(size=1),
+              axis.line.x = element_line(size=1))+
+        scale_y_continuous(limits = c(0,max(ct_df[,-1])),trans = "log1p",
+                           breaks = floor(expm1(max(log1p(round(ct_df[,-1])))/4*0:4 )))+
+        labs(y="UMIs")
+    
+    gp3 <- ggplot(ct_df, aes(x=gene, y=bg2))+geom_bar(stat="identity", fill=bg_col[1])+theme_classic()+
+        theme(axis.text.x = element_blank(),
+              axis.text.y = element_text(size = 13),
+              axis.title.y = element_blank(),
+              axis.title.x=element_text(size = 25),
+              axis.ticks.x = element_blank(),
+              panel.grid = element_blank(),
+              axis.line.y = element_line(size=1),
+              axis.line.x = element_line(size=1))+
+        scale_y_continuous(limits = c(0,max(ct_df[,-1])),trans = "log1p",
+                           breaks = floor(expm1(max(log1p(round(ct_df[,-1])))/4*0:4 )))+
+        labs(x="gene")
+    
+    plot_grid(gp1, gp2, gp3, ncol = 1, align = "vh")
+    
+    
+    # fname <- file.path(tif_dir,paste0(analysis_out$sample_name,"_dist.tif"))
+    # tiff(fname, width = 5.3, height = 4.8,units = "in",res = 300)
+    plot(plot_grid(gp1, gp2, gp3, ncol = 1, align = "vh"))
+    # dev.off()
+}
+```

@@ -1,0 +1,389 @@
+---
+title: "Simulation for spatially variable (SV) gene identification"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Load packages and datasets
+
+```{r, echo=F, include=F}
+library(SpotClean)
+library(SummarizedExperiment)
+library(ggplot2)
+library(Matrix)
+library(Seurat)
+library(dplyr)
+library(viridis)
+library(cowplot)
+library(reshape2)
+library(SoupX)
+library(celda)
+library(reticulate)
+
+SEED <- 2021
+source("~/Google Drive/Hallu/codes/ckgroup/spatial_data/simulation/functions_for_simulation.R")
+
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/public_spatial_datasets.RData")
+sample_names <- c("LIBD_151507","LIBD_151508","LIBD_151669","LIBD_151670","LIBD_151673","LIBD_151674",
+                  "mouse_brain","mouse_kidney","human_breast","human_lymphnode","human_spinalcord")
+tif_dir <- ("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots")
+
+raw_ts_list <- list()
+for(dset in names(raw_list)){
+    top5000 <- rank(-rowMeans(raw_list[[dset]]), ties.method = "first")<=5000
+    gene_tokeep <- rowMeans(raw_list[[dset]])>=0.1 & top5000
+    raw_list[[dset]] <- raw_list[[dset]][gene_tokeep,slide_all_list[[dset]]$barcode]
+    raw_ts_list[[dset]] <- 
+        raw_list[[dset]][,filter(slide_all_list[[dset]], tissue==1)$barcode]
+}
+
+gene_list <- lapply(raw_ts_list, rownames)
+bc_list <- lapply(raw_ts_list, colnames)
+```
+
+### Run SpatialDE on real datasets to identify known DE genes
+
+For the simulation purpose, assume no sequencing depth artifact, so do not regress out total counts. Note: SpatialDE transforms data matrix to Pandas DataFrame, which requires tons of memory. Run one data at a time if no enough memory for storing all 11 datasets.
+
+```{python}
+import SpatialDE
+import NaiveDE
+import numpy as np
+import scipy
+import pandas as pd
+import random
+
+
+spatialde_out = {}
+
+for dset in r.raw_ts_list.keys():
+    print(dset)
+    # Load data from R
+    dat = r.raw_ts_list[dset].toarray()
+    dat = pd.DataFrame(dat)
+    dat.index = r.gene_list[dset]
+    dat.columns = r.bc_list[dset]
+    sample_info = r.slide_all_list[dset]
+    sample_info = sample_info[sample_info.tissue=="1"]
+
+    # Transform to normal
+    norm_expr = NaiveDE.stabilize(dat)
+
+    # Run SpatialDE test
+    random.seed(r.SEED)
+    spatialde_out[dset] = SpatialDE.run(sample_info[["imagerow","imagecol"]], norm_expr.T)
+
+
+```
+
+```{r, echo=F, eval=F}
+DE_out <- lapply(py$spatialde_out, py_to_r)
+for(i in seq_along(DE_out)){
+    rownames(DE_out[[i]]) <- DE_out[[i]]$g
+}
+save(DE_out, file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/SpatialDE_noregress.RData")
+
+```
+
+
+### Simulate known DE and EE genes
+
+DE genes: Use top 500 highest expressed significant genes from SpatialDE (qval <= 0.01).
+
+EE genes: sample iid Poisson counts using the average expression of each DE gene
+
+```{r, echo=F, eval=F}
+sim_matrix <- list()
+set.seed(SEED)
+for(i in seq_along(raw_ts_list)){
+    
+    DE_gene <- DE_out[[i]] %>% filter(qval<=0.01) %>% .$g
+    
+    DE_mat <- raw_list[[i]][DE_gene,]
+    ts_idx <- which(colnames(DE_mat)%in%filter(slide_all_list[[i]],tissue==1)$barcode)
+    bg_idx <- which(colnames(DE_mat)%in%filter(slide_all_list[[i]],tissue==0)$barcode)
+    top_gene <- rowMeans(DE_mat[,ts_idx]) %>% sort(decreasing = T) %>% head(500) %>% names
+    DE_mat <- DE_mat[top_gene,]
+    rownames(DE_mat) <- paste0("DE_",rownames(DE_mat))
+    
+    # Generate EE genes by sampling from the mean
+    ave_exp <- rowMeans(DE_mat[,ts_idx])
+
+    EE_ts_mat <- t(vapply(ave_exp,
+                          function(x) rpois(length(ts_idx),x),numeric(length(ts_idx))))
+    colnames(EE_ts_mat) <- colnames(DE_mat[,ts_idx])
+    EE_bg_mat <- DE_mat[,bg_idx]
+
+    EE_mat <- cbind(EE_ts_mat, EE_bg_mat)[,colnames(DE_mat)]
+
+    rownames(EE_mat) <- gsub("DE_","EE_",rownames(EE_mat))
+    
+    sim_matrix[[i]] <- rbind(DE_mat,EE_mat)
+}
+
+names(sim_matrix) <- names(raw_list)
+
+```
+
+### Simulate contaminated data
+
+```{r, echo=F, eval=F}
+sim_cont_list <- list()
+for(dset in names(sim_matrix)){
+    sim_cont_list[[dset]] <- sim_spatial_matrix(
+        CreateSlide(sim_matrix[[dset]],slide_all_list[[dset]]),
+        seed=SEED
+    )
+}
+
+save(sim_cont_list, 
+     file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_genes.RData")
+```
+
+
+### Perform decontamination using SpotClean, SoupX and DecontX
+
+```{r, echo=F, eval=F}
+sim_decont_list <- list(soupx=list(), decontx=list(), SpotClean=list())
+
+for(dset in names(sim_cont_list)){
+    
+    print(dset)
+    
+    raw_tmp <- sim_cont_list[[dset]]$obs_mat
+    raw_ts_tmp <- raw_tmp[,filter(slide_all_list[[dset]], tissue==1)$barcode]
+    
+    # SoupX
+    sim_decont_list$soupx[[dset]] <- run_soupx(raw_tmp, slide_all_list[[dset]], seed=SEED)
+
+    # DecontX
+    set.seed(SEED)
+    sim_decont_list$decontx[[dset]] <- decontX(raw_ts_tmp)$decontXcounts
+    
+    
+    sim_obj <- CreateSlide(sim_cont_list[[dset]]$obs_mat,
+                           slide_all_list[[dset]],
+                           gene_cutoff = 0, verbose = F)
+    
+    # SpotClean
+    set.seed(SEED)
+    sim_decont_list$SpotClean[[dset]] <- SpotClean(sim_obj,rownames(sim_obj))
+
+}
+
+
+save(sim_decont_list, 
+     file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_decont.RData")
+```
+
+```{r, echo=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_genes.RData")
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_decont.RData")
+```
+
+### Check SoupX and DecontX performance in simulated EE genes
+
+```{r, echo=F, dpi=300, fig.width=20, fig.height=4, warning=F}
+for(dset in names(sim_cont_list)[6]){
+    if(!is.character(sim_decont_list$soupx[[dset]])){
+        EE_genes <- grepl("EE_",rownames(sim_cont_list[[dset]]$obs_mat))
+        slide_tmp <- slide_all_list[[dset]]
+        
+        raw_exp <- sim_cont_list[[dset]]$obs_mat[EE_genes,]
+        soupx_exp <- sim_decont_list$soupx[[dset]][EE_genes,]
+        decontx_exp <- sim_decont_list$decontx[[dset]][EE_genes,]
+        spotclean_exp <- assay(sim_decont_list$SpotClean[[dset]])[EE_genes,]
+        
+        raw_exp <- colSums(raw_exp/apply(raw_exp,1,max))
+        soupx_exp <- colSums(soupx_exp/apply(soupx_exp,1,max))
+        decontx_exp <- colSums(decontx_exp/apply(decontx_exp,1,max))
+        spotclean_exp <- colSums(spotclean_exp/apply(spotclean_exp,1,max))
+        
+        dp1 <- VisualizeHeatmap(
+            slide_tmp,raw_exp,logged = F, viridis = F,
+            subset_barcodes = filter(slide_tmp, tissue==1)$barcode,
+            title = paste0(dset,"_raw_scale"),legend_title = "sum of\nexpression")#+theme_nothing()
+        dp2 <- VisualizeHeatmap(
+            filter(slide_tmp,tissue==1),logged = F, viridis = F,soupx_exp,
+            title = paste0(dset,"_SoupX_scale"),legend_title = "sum of\nexpression")#+theme_nothing()
+        dp3 <- VisualizeHeatmap(
+            filter(slide_tmp,tissue==1),logged = F, viridis = F,decontx_exp,
+            title = paste0(dset,"_DecontX_scale"),legend_title = "sum of\nexpression")#+theme_nothing()
+        dp4 <- VisualizeHeatmap(
+            filter(slide_tmp,tissue==1),logged = F, viridis = F,spotclean_exp,
+            title = paste0(dset,"_SpotClean_scale"),legend_title = "sum of\nexpression")#+theme_nothing()
+        
+        # tiff(file.path(tif_dir,paste0(dset,"_simEE_scale_exp_l.tif")),units = "in", res = 300, width = 22, height = 5)
+        plot(plot_grid(dp1, dp4, dp2, dp3, ncol=4, align="vh"))
+        # dev.off()
+    }
+}
+```
+
+### Run SpatialDE on simulated contaminated data and decontaminated data from SoupX, DecontX and SpotClean
+
+```{r, echo=F, eval=F}
+
+
+if(is(sim_decont_list$SpotClean[[1]],"SummarizedExperiment")){
+    sim_decont_list$SpotClean <- lapply(sim_decont_list$SpotClean, function(x) assay(x))
+}
+
+list_toDE <- c(list(raw=lapply(sim_cont_list, function(x) x$obs_mat)),
+               sim_decont_list)
+
+for(dset in names(sim_cont_list)){
+    if(is.character(list_toDE$soupx[[dset]])){
+        list_toDE$soupx[[dset]] <- NULL # soupx failed in some data
+
+    }
+    list_toDE$raw[[dset]] <- list_toDE$raw[[dset]][,slide_all_list[[dset]]$tissue==1]
+}
+
+gene_list <- lapply(list_toDE$raw, rownames)
+bc_list <- lapply(list_toDE$raw, colnames)
+```
+
+```{python}
+import SpatialDE
+import NaiveDE
+import numpy as np
+import scipy
+import pandas as pd
+import random
+
+spatialde_out = {}
+
+for decont in r.list_toDE.keys():
+    dat_mats = r.list_toDE[decont]
+    spatialde_out[decont] = {}
+    for dset in dat_mats.keys():
+
+        dat = dat_mats[dset].toarray()
+        dat = pd.DataFrame(dat)
+        dat.index = r.gene_list[dset]
+        dat.columns = r.bc_list[dset]
+        sample_info = r.slide_all_list[dset]
+        sample_info = sample_info[sample_info.tissue=="1"]
+
+        norm_expr = NaiveDE.stabilize(dat)
+
+        random.seed(r.SEED)
+        spatialde_out[decont][dset] = SpatialDE.run(sample_info[["imagerow","imagecol"]], norm_expr.T)
+
+```
+
+```{r, eval=F, echo=F}
+py_out <- py$spatialde_out
+
+DE_out <- list()
+for(decont in names(py_out)){
+    for(dset in names(py_out[[decont]])){
+        DE_out[[decont]][[dset]] <- py_to_r(py_out[[decont]][[dset]])
+    }
+}
+save(DE_out, 
+     file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_decont_SpatialDE.RData")
+```
+
+
+
+### Compare tested DE with true DE
+
+```{r, echo=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/codes/sim_DE_EE_decont_SpatialDE.RData")
+
+# q_cutoffs <- c(10^-(10:1),3:20*0.05)
+q_cutoffs <- c(0.01, 0.05, 0.1)
+
+ROC_list <- list()
+
+for(decont in names(DE_out)){
+    
+    ROC_list[[decont]] <- list()
+    
+    for(dset in names(slide_all_list)){
+        if(is.null(DE_out[[decont]][[dset]])){
+            ROC_list[[decont]][[dset]] <- NA
+        }else{
+            ROC_mat <- matrix(0, 4, length(q_cutoffs))
+            rownames(ROC_mat) <- c("FDR","FPR","TPR","q_cutoff")
+            colnames(ROC_mat) <- paste0("q_",q_cutoffs)
+            
+            for(i in seq_along(q_cutoffs)){
+                
+                test_DE <- DE_out[[decont]][[dset]]$qval<=q_cutoffs[i]
+                real_DE <- grepl("DE_",DE_out[[decont]][[dset]]$g)
+                
+                ROC_mat[1,i] <- sum(test_DE & !real_DE)/sum(test_DE) # FDR
+                ROC_mat[2,i] <- sum(test_DE & !real_DE)/sum(!real_DE) # FPR
+                ROC_mat[3,i] <- sum(test_DE & real_DE)/sum(real_DE) # TPR, power
+            }
+            ROC_mat[4,] <- q_cutoffs
+            
+            ROC_list[[decont]][[dset]] <- ROC_mat
+        }
+    }
+}
+
+ROC_list <- purrr::transpose(ROC_list)
+
+ROC_list <- ROC_list[c(6:11,1:5)]
+names(ROC_list) <- sample_names
+
+# Leave blank space for Soupx in human_lymphnode
+ROC_list$human_lymphnode$soupx <- ROC_list$human_lymphnode$raw
+ROC_list$human_lymphnode$soupx[1:3,] <- 0
+```
+
+
+```{r, echo=F, dpi=300, fig.width=8, fig.height=7}
+myPalette <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+
+FDR_p_list <- bar_p_list <- list()
+for(dset in names(ROC_list)){
+    dset_df <- bind_rows(lapply(ROC_list[[dset]], function(x) data.frame(t(x))), 
+              .id = "decont")
+    dset_df$decont <- factor(dset_df$decont, levels = c("raw","SpotClean","soupx","decontx"))
+    dset_df <- filter(dset_df,!is.na(FDR))
+    
+    
+    FDR_p_list[[dset]] <- (ggplot(dset_df, aes(y=q_cutoff, x=FDR, color=decont, group=decont))+
+                            geom_line(size=1)+labs(title=dset, y="q-value cutoff")+
+        theme_set(theme_bw(base_size = 10)) +
+        theme(
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.line = element_line(colour = "black")
+        ))
+    
+    bar_p_list[[dset]] <- ggplot(dset_df, aes(y=FDR,x=factor(q_cutoff),fill=decont))+
+        geom_bar(position = "dodge",stat = "identity")+labs(title=dset)+
+        ylim(c(0,0.5))+scale_fill_manual(values = rev(viridis(4)))+  # myPalette(4)
+        theme(
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.line = element_line(colour = "black"),
+            axis.title = element_blank(),
+            legend.position = "none"
+        )
+    
+    
+}
+
+# tiff("~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots/sim_SV.tif",
+#      res = 300, units = "in", width = 7, height = 6)
+plot_grid(plotlist = bar_p_list, ncol = 3, align = "vh")
+# dev.off()
+
+```
+
+
+### Session Information
+
+```{r}
+sessionInfo()
+```

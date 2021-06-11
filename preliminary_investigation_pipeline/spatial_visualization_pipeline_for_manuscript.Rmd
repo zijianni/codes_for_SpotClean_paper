@@ -1,0 +1,277 @@
+---
+output: html_document
+title: "`r params$html_title`"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+params:
+    html_title: "foo"
+    RData_dir: "foo"
+    tif_dir: "foo"
+    rm_border: FALSE
+---
+
+```{r, include=F}
+####################
+# No need to edit this file unless adding new functionalities
+####################
+
+load(params$RData_dir) # all the rest are based on analysis_out
+tif_dir <- params$tif_dir
+rm_border <- params$rm_border
+
+image_prefix <- file.path(tif_dir, analysis_out$sample_name)
+```
+
+```{r, include=F}
+library(ggplot2)
+library(Matrix)
+library(cowplot)
+library(RColorBrewer)
+library(grid)
+library(readbitmap)
+library(dplyr)
+library(SpotClean)
+library(S4Vectors)
+
+SEED <- 2021
+set.seed(SEED)
+
+bw_col <- c("#000000","#e9e9e9")
+gw_col <- c("#727272","#e9e9e9")
+ts_col <- c("#FF9DC7","#ca8bb1")
+bg_col <- c("#D8D8D8","#767171")
+names(bw_col) <- c("1","0")
+names(gw_col) <- c("1","0")
+colScale_bw <- scale_fill_manual(values = bw_col)
+colScale_gw <- scale_fill_manual(values = gw_col)
+
+.theme_void <- function (base_size = 11, base_family = "", base_line_size = base_size/22, 
+    base_rect_size = base_size/22) 
+{
+    half_line <- base_size/2
+    t <- theme(line = element_blank(), rect = element_blank(), 
+        text = element_text(family = base_family, face = "plain", 
+            colour = "black", size = base_size, lineheight = 0.9, 
+            hjust = 0.5, vjust = 0.5, angle = 0, margin = margin(), 
+            debug = FALSE), axis.text = element_blank(), axis.title = element_blank(), 
+        axis.ticks.length = unit(0, "pt"), axis.ticks.length.x = NULL, 
+        axis.ticks.length.x.top = NULL, axis.ticks.length.x.bottom = NULL, 
+        axis.ticks.length.y = NULL, axis.ticks.length.y.left = NULL, 
+        axis.ticks.length.y.right = NULL, legend.box = NULL, 
+        legend.position = "none", 
+        strip.text = element_text(size = rel(0.8)), strip.switch.pad.grid = unit(half_line/2, 
+            "pt"), strip.switch.pad.wrap = unit(half_line/2, 
+            "pt"), panel.ontop = FALSE, panel.spacing = unit(half_line, 
+            "pt"), plot.margin = unit(c(0, 0, 0, 0), "lines"), 
+        plot.title = element_text(size = rel(1.2), hjust = 0, 
+            vjust = 1, margin = margin(t = half_line)), plot.title.position = "panel", 
+        plot.subtitle = element_text(hjust = 0, vjust = 1, margin = margin(t = half_line)), 
+        plot.caption = element_text(size = rel(0.8), hjust = 1, 
+            vjust = 1, margin = margin(t = half_line)), plot.caption.position = "panel", 
+        plot.tag = element_text(size = rel(1.2), hjust = 0.5, 
+            vjust = 0.5), plot.tag.position = "topleft", 
+        complete = TRUE)
+    ggplot2:::ggplot_global$theme_all_null %+replace% t 
+}
+
+
+find_border <- function(slide, is_tissue=TRUE){
+    # Find border spots. i.e. tissue spots adjacent to background spots, or
+    # background spots adjacent to tissue spots.
+    # Args:
+    #   slide (dataframe): the slide data frame
+    #   is_tissue (logical): whether return tissue border or background border
+    # Returns:
+    #   (dataframe) slide dataframe with additional column indicating
+    #       border (1) or not (0)
+    is_tissue <- as.integer(is_tissue)
+    target_positions <- slide %>% filter(tissue==is_tissue) %>% select(row, col)
+    remaining_positions_1d <- slide %>% filter(tissue==(1-is_tissue)) %>% select(row, col) %>%
+        apply(1, paste, collapse="_")
+
+    is_border <- numeric(nrow(target_positions))
+    for(ts_idx in seq_len(nrow(target_positions))){
+        sur_spots_1d <- .surrounding_spots(target_positions[ts_idx,]) %>%
+            apply(1, paste, collapse="_")
+
+        if(any(sur_spots_1d%in%remaining_positions_1d)){
+            is_border[ts_idx] <- 1
+        }
+    }
+
+    slide$border <- 0
+    slide$border[slide$tissue==is_tissue] <- is_border
+    slide$border <- as.factor(slide$border)
+    return(slide)
+}
+
+.surrounding_spots <- function(spot_pos){
+    # Return the row/col positions of the 8 surrounding spots of a given spot position in 10x Visium
+    # Note: It might give invalid spots if input spot is on the edge of the slide
+    # Args:
+    #   pos (vector of int): length two vector telling the row and column of input barcode
+    # Returns:
+    #   (dataframe of int): a 8 by 2 dataframe. Each row is the position of one surrounding spot
+
+    pos_shifts <- rbind(c(-1,-1,0,0,1,1),
+                        c(-1,1,-2,2,-1,1))
+
+    sur_pos <- t(as.numeric(spot_pos)+pos_shifts)
+    colnames(sur_pos) <- c("row", "col")
+
+    return(sur_pos)
+}
+
+if(rm_border){
+  border_ <- 0
+}else{
+  border_ <- 0:1
+}
+```
+
+```{r, echo=F}
+# find border spots
+analysis_out$bcs <- find_border(analysis_out$bcs)
+
+slide_info <- list(slide=analysis_out$bcs)
+if(!is.null(analysis_out$images_tibble)){
+    slide_info$grob <- analysis_out$images_tibble$grob[[1]]
+}
+raw_obj <- CreateSlide(analysis_out$raw_matrix,
+                       slide_info,
+                       gene_cutoff = 0)
+
+```
+
+#### Color by spots labels (tissue or not)
+
+```{r,echo=F, dpi=300, fig.width=4, fig.height=3.5}
+VisualizeLabel(raw_obj, label="tissue",  legend_title = "Tissue spots?")+
+  theme(legend.position = "none")+
+  .theme_void()+labs(title = NULL)
+
+
+tiff(paste0(image_prefix,"_lab.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+VisualizeLabel(raw_obj, label="tissue",  legend_title = "Tissue spots?")+
+  theme(legend.position = "none")+
+  .theme_void()+labs(title = NULL)
+dev.off()
+```
+
+#### Color by UMI counts
+
+
+```{r,echo=F, dpi=300, fig.width=5, fig.height=4}
+VisualizeHeatmap(
+        raw_obj,value = "sum_umi",viridis = F, 
+        legend_range = range(filter(analysis_out$bcs,border%in%border_)$sum_umi),
+        legend_title = "total UMIs",
+        title = "",subset_barcodes = filter(analysis_out$bcs,border%in%border_)$barcode)
+
+tiff(paste0(image_prefix,"_counts_wl_r.tif"), width = 6.6, height = 5.5,units = "in",res = 300)
+VisualizeHeatmap(
+        raw_obj,value = "sum_umi",viridis = F, 
+        legend_range = range(filter(analysis_out$bcs,border%in%border_)$sum_umi),
+        legend_title = "total UMIs",
+        title = "",subset_barcodes = filter(analysis_out$bcs,border%in%border_)$barcode)
+dev.off()
+```
+
+```{r,echo=F, dpi=300, fig.width=4, fig.height=3.5}
+VisualizeHeatmap(
+        raw_obj,value = "sum_umi",viridis = F, 
+        legend_range = range(metadata(raw_obj)$slide$sum_umi),
+        legend_title = "total UMIs",
+        title = "",
+        subset_barcodes = filter(analysis_out$bcs,border%in%border_)$barcode)+.theme_void()+labs(title = NULL)
+
+tiff(paste0(image_prefix,"_counts_nl_r.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+VisualizeHeatmap(
+        raw_obj,value = "sum_umi",viridis = F, 
+        legend_range = range(metadata(raw_obj)$slide$sum_umi),
+        legend_title = "total UMIs",
+        title = "",
+        subset_barcodes = filter(analysis_out$bcs,border%in%border_)$barcode)+.theme_void()+labs(title = NULL)
+dev.off()
+```
+
+#### Distribution of sum UMIs in tissue and background
+
+```{r, echo=F, dpi=300, fig.width=4, fig.height=3}
+brks <- c(0,10^(0:6))
+max_val <- max(filter(analysis_out$bcs, border%in%border_)$sum_umi)
+max_digit <- as.integer(strsplit(as.character(max_val),"")[[1]][1])
+if(max_digit%in%3:9){
+  brks <- pmin(brks,max_val)
+}
+
+gp <- ggplot()+geom_density(data=analysis_out$bcs%>%filter(tissue==1,border%in%border_),aes(x=sum_umi), color=ts_col[2], fill=ts_col[1], alpha=0.5, size=1.3)+
+    geom_density(data=analysis_out$bcs%>%filter(tissue==0,border%in%border_),aes(x=sum_umi), color=bg_col[2],fill=bg_col[1], alpha=0.5, size=1.3)+
+    scale_x_continuous(trans="log1p",breaks = brks)+
+    theme_classic()+labs(x="total UMI counts (log scaled)")+
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(size=25),
+          #axis.ticks.y = element_blank(),
+          axis.text.y = element_text(size = 15),
+          axis.text.x=element_text(size = 15),
+          axis.line = element_line(size=1, arrow = arrow(length = unit(10,'pt'))))
+
+gp
+
+tiff(paste0(image_prefix,"_density.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+gp
+dev.off()
+```
+
+
+#### UMAP plots colored by Seurat clusters and spots labels
+
+```{r, echo=F, dpi=300, fig.width=4, fig.height=3.5}
+gp <- Seurat::DimPlot(analysis_out$S_obj, reduction = "umap", 
+                label = TRUE,label.size = 8,pt.size = 1,
+                cells = filter(analysis_out$bcs,border%in%border_)$barcode)+
+  theme(legend.position = "none", axis.text = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.line = element_line(size=1, arrow = arrow(length = unit(10,'pt'))),
+        axis.title = element_text(size = 25))
+
+gp
+
+tiff(paste0(image_prefix,"_umap_cl.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+gp
+dev.off()
+```
+
+```{r, echo=F, dpi=300, fig.width=4, fig.height=3.5}
+gp <- Seurat::DimPlot(analysis_out$S_obj, reduction = "umap", 
+                      label = FALSE, group.by = "bc_label", cols=c("#CCCCCC","#FF7BAC"),
+                      cells = filter(analysis_out$bcs,border%in%border_)$barcode,
+                      pt.size = 1, label.size = 8)+  
+  theme(legend.position = "none", axis.text = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.line = element_line(size=1, arrow = arrow(length = unit(10,'pt'))),
+        axis.title = element_text(size = 25))
+
+gp
+
+tiff(paste0(image_prefix,"_umap_lab.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+gp
+dev.off()
+```
+
+#### Visualize Seurat clusters in spatial image
+
+```{r, echo=F, dpi=300, fig.width=4, fig.height=3.5}
+gp <- VisualizeLabel(raw_obj, "clust",
+               title = paste0(analysis_out$sample_name,": clusters"),
+               legend_title = "Seurat clusters",
+               subset_barcodes = filter(analysis_out$bcs,border%in%border_)$barcode)+
+  .theme_void()+labs(title = NULL)
+
+gp
+
+tiff(paste0(image_prefix,"_slide_cl.tif"), width = 5.3, height = 4.8,units = "in",res = 300)
+gp
+dev.off()
+```

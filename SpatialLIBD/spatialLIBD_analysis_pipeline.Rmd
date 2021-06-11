@@ -1,0 +1,126 @@
+---
+title: "Investigate spot swapping contamination in SpatialLIBD data"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Write a separate pipeline for SpatialLIBD data as they don't provide full output files from 10x Space Ranger pipeline.
+
+```{r, echo=F}
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(viridis)
+library(cowplot)
+library(reshape2)
+library(Seurat)
+library(scran)
+library(scuttle)
+
+SEED <- 2021
+
+# spatialLIBD
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/12brains.RData")
+sets_tokeep <- c("sp_151507","sp_151508","sp_151669","sp_151670","sp_151673","sp_151674")
+
+names(raw_matrix) <- names(slide_list_impute) <- paste0("sp_",names(raw_matrix))
+raw_matrix <- raw_matrix[sets_tokeep]
+slide_list <- slide_list_impute[sets_tokeep]
+```
+
+```{r, echo=F}
+# summary statistics
+
+for(dset in names(slide_list)){
+    raw_matrix[[dset]] <- raw_matrix[[dset]][,slide_list[[dset]]$barcode]
+
+    
+    mt_gene <- grepl("MT-|mt-",rownames(raw_matrix[[dset]]))
+    total_counts <- Matrix::colSums(raw_matrix[[dset]])
+    if(any(mt_gene)){
+        mt_counts <- Matrix::colSums(raw_matrix[[dset]][mt_gene,])
+    }else{
+        warning("No MT gene detected in ",dset)
+        mt_counts <- NA
+    }
+    slide_list[[dset]]$mt_prop <- mt_counts/total_counts
+    slide_list[[dset]]$sum_umi <- total_counts
+    slide_list[[dset]]$sum_gene = Matrix::colSums(raw_matrix[[dset]] != 0)
+}
+
+
+# scran normalization of raw matrix
+
+norm_matrix <- list()
+
+for(dset in names(slide_list)){
+    set.seed(SEED)
+    sce <- SingleCellExperiment(list(counts=raw_matrix[[dset]]))
+    clusters <- quickCluster(sce, min.size=200)
+    sce <- computeSumFactors(sce, cluster=clusters)
+    min_sf <- min(sce$sizeFactor[sce$sizeFactor>0])
+    # deal with potential nonpositive size factors
+    sce$sizeFactor[sce$sizeFactor<=0] <- min_sf
+    sce <- logNormCounts(sce)
+
+    norm_matrix[[dset]] <- logcounts(sce)
+}
+
+# UMAP and clustering using Seurat
+
+S_obj <- list()
+
+for(dset in names(slide_list)){
+    set.seed(SEED)
+    S_obj[[dset]] <- CreateSeuratObject(counts = norm_matrix[[dset]], project = "spatial") %>%
+        FindVariableFeatures(selection.method = "vst", nfeatures = 4000) %>%
+        ScaleData %>%
+        RunPCA %>%
+        RunUMAP(dims=1:25) %>%
+        FindNeighbors(dims = 1:25) %>%
+        FindClusters
+
+    S_obj[[dset]]$bc_label <- slide_list[[dset]]$tissue
+    slide_list[[dset]]$clust <- S_obj[[dset]]$seurat_clusters
+}
+
+# write output
+out_dir <- paste0("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/",
+                  sets_tokeep)
+RData_dir <- paste0(out_dir,"/",sets_tokeep,".RData")
+
+
+for(i in seq_along(slide_list)){
+    
+    analysis_out <- list()
+    analysis_out$sample_name <- sets_tokeep[i]
+    analysis_out$bcs <- slide_list[[i]]
+    analysis_out$raw_matrix <- raw_matrix[[i]]
+    analysis_out$norm_matrix <- norm_matrix[[i]]
+    analysis_out$S_obj <- S_obj[[i]]
+
+    if(!dir.exists(out_dir[i])){
+        dir.create(out_dir[i],recursive = T)
+    }
+    save(analysis_out, file = RData_dir[i])
+    
+}
+
+# generate visualization report
+html_title <- paste0("Spatial data visualization: ",sets_tokeep)
+out_html <- gsub("RData\\>","html",RData_dir)
+out_html2 <- gsub(".RData\\>","_fig.html",RData_dir)
+
+for(i in seq_along(sets_tokeep)){
+    rmarkdown::render("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatial_visualization_pipeline.Rmd",
+                      params=list(html_title=html_title[i], RData_dir=RData_dir[i]),
+                      output_dir = out_dir[i],
+                      output_file = out_html[i])
+    
+    rmarkdown::render("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatial_visualization_pipeline_for_manuscript.Rmd",
+                      params=list(html_title=html_title[i], RData_dir=RData_dir[i]),
+                      output_dir = out_dir[i],
+                      output_file = out_html2[i])
+}
+```
