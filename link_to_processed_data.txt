@@ -16,5 +16,7 @@ It contains
 
 - RData files for reproducing the analyses of SpatialLIBD data
 
+- Visually malignant annotation and RData files for reproducing the analyses of SPOTlight decomposition of breast cancer data
+
 Zijian Ni
-06/05/2021
+07/18/2021

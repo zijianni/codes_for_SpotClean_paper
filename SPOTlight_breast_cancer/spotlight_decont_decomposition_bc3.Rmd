@@ -1,0 +1,372 @@
+---
+title: "SpotClean and SPOTlight (cell type deconvolution)"
+author: "Zijian Ni"
+date: "7/8/2021"
+output: html_document
+---
+
+```{r, echo=F}
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(SpotClean)
+library(Seurat)
+library(Matrix)
+library(reshape2)
+library(SPOTlight)
+library(RColorBrewer)
+
+SEED <- 2021
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
+spatial_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_raw_feature_bc_matrix/raw_feature_bc_matrix"
+spatial_slide_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_spatial/spatial/tissue_positions_list.csv"
+spatial_img_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_spatial/spatial/tissue_lowres_image.png"
+scale_factor_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_spatial/spatial/scalefactors_json.json"
+
+visual_tumor_csv <- "~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/visual_tumor.csv"
+
+sc_dir <- "~/Google Drive/Hallu/DATA/Fluidigm/breast_cancer_atlas/GSE75688_GEO_processed_Breast_Cancer_raw_TPM_matrix.txt"
+sc_ann_dir <- "~/Google Drive/Hallu/DATA/Fluidigm/breast_cancer_atlas/GSE75688_final_sample_information.txt/GSE75688_final_sample_information.txt"
+
+calc_entropy <- function(p){
+    -sum(p*log(p), na.rm = T)
+}
+```
+
+### Load reference single-cell data and brain Visium data
+
+```{r, echo=F}
+bc_raw <- Read10xRaw(spatial_dir)
+bc_slide <- Read10xSlide(spatial_slide_dir,spatial_img_dir, scale_factor_dir)
+slide_obj <- CreateSlide(bc_raw, bc_slide)
+
+bc_sc_ann <- read.table(sc_ann_dir, header = T, row.names = 1) %>% filter(type=="SC")
+
+bc_sc <- read.table(sc_dir, header = T, row.names = 1) %>% 
+    filter(gene_name%in%rownames(slide_obj),gene_type=="protein_coding")
+bc_sc_mat <- select(bc_sc, -gene_name, -gene_type)[,rownames(bc_sc_ann)] %>% as.matrix
+rownames(bc_sc_mat) <- bc_sc$gene_name
+bc_sc_mat <- bc_sc_mat[rowMeans(bc_sc_mat)>=1,]
+
+# remove duplicated gene names
+n_occur <- table(rownames(bc_sc_mat))
+for(gn in names(n_occur)[n_occur>1]){
+    gn_idx <- which(rownames(bc_sc_mat)==gn)
+    idx_drop <- gn_idx[-which.max(rowSums(bc_sc_mat[gn_idx,]))]
+    bc_sc_mat <- bc_sc_mat[-idx_drop,]
+}
+
+slide_obj <- slide_obj[rownames(bc_sc_mat),]
+
+visual_tumor_label <- read.csv(visual_tumor_csv)
+
+# 
+# load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spotlight_decont_bc.RData")
+# 
+
+# decont_obj@metadata$slide <- merge(decont_obj@metadata$slide,visual_tumor_label,by.x="barcode",by.y="Barcode")
+
+```
+
+### Process single-cell data
+
+Dimension reduction and visualization. No normalization since the expression is TPM.
+
+```{r, echo=F, eval=F}
+set.seed(SEED)
+S_sc <- CreateSeuratObject((bc_sc_mat)) %>%
+    FindVariableFeatures(verbose=F) %>%
+    ScaleData(verbose=F) %>%
+    RunPCA(verbose = FALSE) %>%
+    RunUMAP(dims = 1:30, verbose = FALSE)
+
+S_sc$sample <- gsub("(BC.*)_.*","\\1",rownames(bc_sc_ann))
+S_sc$celltype <- bc_sc_ann$index3
+
+# DE marker genes
+Idents(S_sc) <- "celltype"
+cluster_markers_all <- FindAllMarkers(object = S_sc,
+                                      slot = "data",
+                                      verbose = F, 
+                                      only.pos = TRUE)
+
+DimPlot(S_sc,
+        group.by = "celltype",
+        label = TRUE) + NoLegend()
+DimPlot(S_sc,
+        group.by = "sample",
+        label = TRUE) + NoLegend()
+```
+
+
+
+### Decompose spatial data
+
+```{r, echo=F, eval=F}
+set.seed(SEED)
+
+spotlight_raw <- spotlight_deconvolution(
+    se_sc = S_sc,
+    counts_spatial = slide_obj@assays@data$raw[decont_obj@metadata$decontaminated_genes,colnames(decont_obj)],
+    clust_vr = "celltype", # Variable in sc_seu containing the cell-type annotation
+    cluster_markers = cluster_markers_all, # Dataframe with the marker genes
+    cl_n = 100, # number of cells per cell type to use
+    hvg = 3000, # Number of HVG to use
+    ntop = NULL, # How many of the marker genes to use (by default all)
+    transf = "uv", # Perform unit-variance scaling per cell and spot prior to factorization and NLS
+    method = "nsNMF", # Factorization method
+    min_cont = 0 # Remove those cells contributing to a spot below a certain threshold 
+)
+
+set.seed(SEED)
+
+spotlight_decont <- spotlight_deconvolution(
+    se_sc = S_sc,
+    counts_spatial = decont_obj@assays@data$decont[decont_obj@metadata$decontaminated_genes,],
+    clust_vr = "celltype", # Variable in sc_seu containing the cell-type annotation
+    cluster_markers = cluster_markers_all, # Dataframe with the marker genes
+    cl_n = 100, # number of cells per cell type to use
+    hvg = 3000, # Number of HVG to use
+    ntop = NULL, # How many of the marker genes to use (by default all)
+    transf = "uv", # Perform unit-variance scaling per cell and spot prior to factorization and NLS
+    method = "nsNMF", # Factorization method
+    min_cont = 0 # Remove those cells contributing to a spot below a certain threshold 
+)
+
+save(decont_obj, spotlight_raw, spotlight_decont, cluster_markers_all, file = "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spotlight_decont_bc3.RData")
+```
+
+```{r, echo=F, message=F, warning=F}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spotlight_decont_bc3.RData")
+
+nmf_mod_list <- list(raw=spotlight_raw[[1]], SpotClean=spotlight_decont[[1]])
+decon_mtrx_list <- list(raw=spotlight_raw[[2]], SpotClean=spotlight_decont[[2]])
+
+S_sp <- Load10X_Spatial("~/Google Drive/Hallu/DATA/10x/Spatial/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer_spatial","Visium_FFPE_Human_Breast_Cancer_raw_feature_bc_matrix.h5")
+
+S_sp_list <- list(raw=S_sp[rownames(decont_obj),colnames(decont_obj)], 
+                      SpotClean=S_sp[rownames(decont_obj),colnames(decont_obj)])
+S_sp_list$SpotClean@assays$Spatial@counts <- 
+    S_sp_list$SpotClean@assays$Spatial@data <- 
+    decont_obj@assays@data$decont
+
+for(dset in names(nmf_mod_list)){
+    
+    rownames(decon_mtrx_list[[dset]]) <- colnames(S_sp_list[[dset]])
+    
+    decon_df <- decon_mtrx_list[[dset]] %>%
+        data.frame() %>%
+        tibble::rownames_to_column("barcodes")
+    
+    S_sp_list[[dset]]@meta.data <- S_sp_list[[dset]]@meta.data %>%
+        tibble::rownames_to_column("barcodes") %>%
+        dplyr::left_join(decon_df, by = "barcodes") %>%
+        tibble::column_to_rownames("barcodes")
+    
+    decont_obj@metadata$slide[[paste0("celltype_",dset)]] <- 
+        colnames(decon_mtrx_list[[dset]])[
+            apply(decon_mtrx_list[[dset]],1,which.max)]
+
+}
+```
+
+### Assess decomposition
+
+```{r, echo=F, fig.width=15, fig.height=15}
+dset <- "raw"
+nmf_mod <- nmf_mod_list[[dset]]
+
+h <- NMF::coef(nmf_mod[[1]])
+rownames(h) <- paste("Topic", 1:nrow(h), sep = "_")
+topic_profile_plts <- dot_plot_profiles_fun(
+    h = h,
+    train_cell_clust = nmf_mod[[2]])
+# Cell type level:
+plot(topic_profile_plts[[2]] + theme(
+    axis.text.x = element_text(angle = 90), 
+    axis.text = element_text(size = 12)))
+
+# Cell level:
+plot(topic_profile_plts[[1]] + theme(axis.text.x = element_text(angle = 90), 
+                                     axis.text = element_text(size = 12)))
+
+
+```
+
+
+### Evaluate decomposition of spatial data
+
+Check the proportion of dominant cell type as well as purity (measured by entropy) for each likely-pure spot.
+
+```{r, echo=F}
+pure_spots <- which(apply(decon_mtrx_list$raw, 1, max)>0.5)
+
+max_df <- ent_df <- data.frame(barcode=rownames(decon_mtrx_list$raw)[pure_spots])
+for(dset in names(nmf_mod_list)){
+    
+    decon_mtrx <- decon_mtrx_list[[dset]]
+    
+    max_df[[dset]] <- apply(decon_mtrx[pure_spots,], 1, max)
+    ent_df[[dset]] <- apply(decon_mtrx[pure_spots,], 1, calc_entropy)
+    
+}
+
+```
+
+```{r, echo=F, fig.width=5, fig.height=5}
+ggplot(melt(max_df, id.vars = "barcode",
+            value.name = "max_prop", variable.name = "group"),
+       aes(x=group,y=max_prop, fill=group))+
+    geom_boxplot()+
+    theme_bw()+labs(title="SPOTlight: max proportion in likely-pure spots")
+
+ggplot(melt(ent_df, id.vars = "barcode",
+            value.name = "entropy", variable.name = "group"),
+       aes(x=group,y=entropy, fill=group))+
+    geom_boxplot()+
+    theme_bw()+labs(title="SPOTlight: entropy in likely-pure spots")
+```
+
+### Visualize composition
+
+```{r, echo=F, fig.width=10, fig.height=8,warning=F, message=F}
+for(dset in names(nmf_mod_list)){
+    plot(SpatialFeaturePlot(
+        object = S_sp_list[[dset]],
+        features = colnames(decon_mtrx)[-ncol(decon_mtrx)],
+        alpha = c(0.01, 1)))
+}
+```
+
+
+##### Plot estimated malignant composition
+
+```{r, echo=F}
+malig_cutoff <- 0.1
+for(dset in names(S_sp_list)){
+    S_sp_list[[dset]]$comp_malignant_status <- 
+        ifelse(decon_mtrx_list[[dset]][,"Tumor"]>=malig_cutoff,"tumor","normal")
+    S_sp_list[[dset]]$visual_malignant_status <- 
+        visual_tumor_label$visual_tumor[
+            match(colnames(S_sp_list[[dset]]),visual_tumor_label$Barcode)
+        ]
+    S_sp_list[[dset]]$tumor_comp <- 
+        decon_mtrx_list[[dset]][colnames(S_sp_list[[dset]]),"Tumor"]
+}
+
+```
+
+```{r, echo=F, fig.width=20, fig.height=8}
+
+# tiff(file.path(tif_dir,"breast_cancer_decomp.tif"),res = 300,
+#      width = 12, height = 4, units = "in")
+plot_grid(
+    SpatialFeaturePlot(S_sp_list$raw,features = "tumor_comp",alpha = c(0,1),crop = F,
+                       min.cutoff = 0.1, max.cutoff = 0.25, stroke = 1e-10)+
+        NoLegend()+
+        labs(fill="Malignant\ncomposition  ")+
+        scale_fill_gradient(low="pink",high="darkblue"),
+    
+    SpatialFeaturePlot(S_sp_list$SpotClean,features = "tumor_comp",alpha = c(0,1),crop = F,
+                       min.cutoff = 0.1, max.cutoff = 0.25, stroke = 1e-10)+
+        NoLegend()+
+        labs(fill="Malignant composition")+
+        scale_fill_gradient(low="pink",high="darkblue"),
+    SpatialDimPlot(S_sp_list$raw[,S_sp_list$raw$visual_malignant_status=="visual_tumor"], 
+                   crop = F,pt.size.factor = 1.5, stroke = 1e-10,
+                   group.by = "visual_malignant_status",cols = "darkblue")+NoLegend(),
+    
+    ncol=3, align = "vh")
+# dev.off()
+
+
+```
+
+##### Spearman correlation to single-cell reference data
+
+```{r, echo=F}
+true_normal_spot <- rownames(decon_mtrx_list$raw)[
+    decon_mtrx_list$raw[,"Tumor"]<0.05 & decon_mtrx_list$SpotClean[,"Tumor"]<0.05
+]
+
+
+false_tumor_spot <- rownames(decon_mtrx_list$raw)[
+    decon_mtrx_list$raw[,"Tumor"]>=malig_cutoff & decon_mtrx_list$SpotClean[,"Tumor"]<malig_cutoff
+]
+true_tumor_spot <- rownames(decon_mtrx_list$raw)[
+    decon_mtrx_list$raw[,"Tumor"]>=0.3 & decon_mtrx_list$SpotClean[,"Tumor"]>=0.3
+]
+
+S_sp_list$raw$malignant_status_sub <- "NA"
+S_sp_list$raw$malignant_status_sub[true_normal_spot] <- "strongly non-malignant"
+S_sp_list$raw$malignant_status_sub[false_tumor_spot] <- "questionably malignant"
+S_sp_list$raw$malignant_status_sub[true_tumor_spot] <- "strongly malignant"
+
+false_cor_df <- data.frame(barcode=false_tumor_spot, spot_group="questionably malignant")
+true_cor_df <- data.frame(barcode=true_tumor_spot, spot_group="strongly malignant")
+tn_cor_df <- data.frame(barcode=true_normal_spot, spot_group="strongly non-malignant")
+
+bc_sc_ann$index <- ifelse(bc_sc_ann$index=="Tumor","malignant","non-malignant")
+
+for(ct in unique(bc_sc_ann$index)){
+    ave_exp <- rowMeans(bc_sc_mat[decont_obj@metadata$decontaminated_genes,rownames(filter(bc_sc_ann, index==ct))])
+    
+    false_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[decont_obj@metadata$decontaminated_genes,false_tumor_spot],
+                          2, function(x) cor(x,ave_exp, method = "spearman"))
+    true_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[decont_obj@metadata$decontaminated_genes,true_tumor_spot],
+                          2, function(x) cor(x,ave_exp, method = "spearman"))
+    tn_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[decont_obj@metadata$decontaminated_genes,true_normal_spot],
+                          2, function(x) cor(x,ave_exp, method = "spearman"))
+
+}
+
+```
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=2}
+melt_df <- melt(rbind(false_cor_df,true_cor_df,tn_cor_df),
+     id.vars = c("barcode","spot_group"),variable.name = "cell_type",
+     value.name = "correlation")
+melt_df$spot_group <- factor(melt_df$spot_group,
+                             levels = c("strongly non-malignant","questionably malignant","strongly malignant"))
+
+    
+
+
+# tiff(file.path(tif_dir,"breast_cancer_decomp_boxplot.tif"),res = 300,
+#      width = 5, height = 1.8, units = "in")
+ggplot(melt_df,aes(x=cell_type,y=correlation,fill=spot_group))+
+    geom_boxplot()+theme_bw()+
+    theme(legend.position = "right",
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(size=10),
+          legend.text=element_text(size=10),
+          legend.title = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.border = element_rect(size=1)
+    )+
+    labs(y="Spearman\ncorrelation")
+# dev.off()
+```
+
+
+##### Visualize spot groups in UMAP plot
+
+
+```{r, echo=F, dpi=300, fig.width=5.5, fig.height=4}
+S_sp_list$SpotClean <- S_sp_list$SpotClean %>% NormalizeData(verbose=F) %>%
+    FindVariableFeatures(verbose=F) %>% ScaleData(verbose=F) %>%
+    RunPCA(verbose=F) %>% RunUMAP(dims=1:30,verbose=F) %>% RunTSNE(dims=1:30,verbose=F)
+
+S_sp_list$SpotClean$malignant_status_sub <- S_sp_list$raw$malignant_status_sub
+
+# tiff(file.path(tif_dir,"breast_cancer_decomp_UMAP.tif"),res = 300,
+#      width = 5.2, height = 3.2, units = "in")
+DimPlot(S_sp_list$SpotClean, group.by = "malignant_status_sub", 
+        pt.size = 1,cols = c("gray","#00BA38","#619CFF","#F8766D"))+
+    theme_bw()+labs(title = "")+
+    theme(legend.text=element_text(size=10),
+          panel.border = element_rect(size=1))
+# dev.off()
+```
