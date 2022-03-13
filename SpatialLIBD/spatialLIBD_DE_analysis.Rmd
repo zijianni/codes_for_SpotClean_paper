@@ -442,7 +442,7 @@ for(dset in names(decont_obj_list)){
 
 ### Check DE results of known DE genes
 
-Check Layer1 v.s. Layer6
+Check WM v.s. Layer6
 
 Known marker genes used: (1) fdr<=1e-5 in SpatialLIBD, (2) decontaminated by SpotClean (recall that SpotClean filter out low-expressed and low-variable genes), (3) within top 100 highest expressed genes in raw data. 
 
@@ -545,6 +545,47 @@ for(dset in names(DE_all)){
     # dev.off()
 }
 ```
+
+### Review: check new DE and new EE genes after decontamination
+
+```{r, echo=F}
+# make use of Seurat FindMarkers() for a more efficient computation
+
+DE_list <- list(raw=list(), decont=list())
+for(meth in names(norm_list)){
+    for(dset in names(norm_list[[meth]])){
+        set.seed(SEED)
+        S_tmp <- CreateSeuratObject(norm_list[[meth]][[dset]])
+        S_tmp$layer_guess <- as.character(slide_list[[dset]]$layer_guess)
+        Idents(S_tmp) <- "layer_guess"
+        DE_list[[meth]][[dset]] <- 
+            FindMarkers(S_tmp, ident.1 = "WM", ident.2 = "Layer6", test.use = "t", logfc.threshold = 0) %>% 
+            mutate(gene=rownames(.))
+    }
+}
+
+# make sure the number of genes is the same between raw and decont before adjusting p-value
+lapply(DE_list$raw, nrow)
+lapply(DE_list$decont, nrow)
+
+padj_cutoff <- 0.01
+new_DE_list <- new_EE_list <- list()
+for(dset in names(norm_list$raw)){
+
+    new_EE <- intersect(filter(DE_list$raw[[dset]],p_val_adj<=padj_cutoff)$gene,
+                        filter(DE_list$decont[[dset]],p_val_adj>padj_cutoff)$gene)
+    new_DE <- intersect(filter(DE_list$raw[[dset]],p_val_adj>padj_cutoff)$gene,
+                        filter(DE_list$decont[[dset]],p_val_adj<=padj_cutoff)$gene)
+    
+    new_DE_list[[dset]] <- data.frame(gene=new_DE, 
+                                      raw_padj=DE_list$raw[[dset]][new_DE,]$padj, 
+                                      decont_padj=DE_list$decont[[dset]][new_DE,]$padj)
+    new_EE_list[[dset]] <- data.frame(gene=new_EE, 
+                                      raw_padj=DE_list$raw[[dset]][new_EE,]$padj, 
+                                      decont_padj=DE_list$decont[[dset]][new_EE,]$padj)
+}
+```
+
 
 ### Session information
 
