@@ -14,10 +14,10 @@ output: html_document
 ```{r, echo=F}
 library(SpotClean)
 library(ggplot2)
+library(dplyr)
 library(Matrix)
 library(scuttle)
 library(Seurat)
-library(dplyr)
 library(reshape2)
 library(cowplot)
 
@@ -191,7 +191,7 @@ for(dset in names(slide_obj_list)){
 
 ### Visualize species labels
 
-```{r, echo=F, dpi=300, fig.width=14, fig.height=6}
+```{r, echo=F, dpi=300, fig.width=5, fig.height=4}
 for(dset in names(slide_obj_list)){
     cols <- myPalette(7)[c(2,5,7)]
     names(cols) <- c("human","mixture","mouse")
@@ -246,6 +246,7 @@ for(dset in names(slide_obj_list)){
 spot_prop_list <- gene_prop_list <- list()
 
 wrong_prop <- matrix(0, 2, length(slide_obj_list))
+
 rownames(wrong_prop) <- c("human","mouse")
 colnames(wrong_prop) <- names(slide_obj_list)
 
@@ -278,9 +279,14 @@ for(dset in names(slide_obj_list)){
     # Mouse spot: human UMIs / total UMIs
     # Background spot: all UMIs / total UMIs
     lpss <- numeric(nrow(slide_tmp))
-    lpss[slide_tmp$species=="background"] <- slide_tmp$sum_umi[slide_tmp$species=="background"]/sum(raw_mat)
-    lpss[slide_tmp$species=="human"] <- slide_tmp$sum_mouse_umi[slide_tmp$species=="human"]/sum(raw_mat)
-    lpss[slide_tmp$species=="mouse"] <- slide_tmp$sum_human_umi[slide_tmp$species=="mouse"]/sum(raw_mat)
+    # lpss[slide_tmp$species=="background"] <- slide_tmp$sum_umi[slide_tmp$species=="background"]/sum(raw_mat)
+    # lpss[slide_tmp$species=="human"] <- slide_tmp$sum_mouse_umi[slide_tmp$species=="human"]/sum(raw_mat)
+    # lpss[slide_tmp$species=="mouse"] <- slide_tmp$sum_human_umi[slide_tmp$species=="mouse"]/sum(raw_mat)
+    
+    # 02/22: per-spot LPSS: 
+    lpss[slide_tmp$species=="background"] <- NA
+    lpss[slide_tmp$species=="human"] <- (slide_tmp$sum_mouse_umi/slide_tmp$sum_umi)[slide_tmp$species=="human"]
+    lpss[slide_tmp$species=="mouse"] <- (slide_tmp$sum_human_umi/slide_tmp$sum_umi)[slide_tmp$species=="mouse"]
     
     
     spot_prop_list[[dset]] <- 
@@ -309,18 +315,24 @@ for(dset in names(slide_obj_list)){
                                          human_prop=gene_human_prop,
                                          mouse_prop=gene_mouse_prop)
     
-    wrong_prop[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
-        sum(raw_mat[human_gene,])
-    wrong_prop[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
-        sum(raw_mat[!human_gene,])
+    # wrong_prop[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
+    #     sum(raw_mat[human_gene,])
+    # wrong_prop[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
+    #     sum(raw_mat[!human_gene,])
     
-    wrong_prop2[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
+    wrong_prop[1,dset] <- 1-sum(raw_mat[human_gene,human_spots])/
         sum(raw_mat[human_gene,c(human_spots,mouse_spots)])
-    wrong_prop2[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
+    wrong_prop[2,dset] <- 1-sum(raw_mat[!human_gene,mouse_spots])/
         sum(raw_mat[!human_gene,c(human_spots,mouse_spots)])
     
-    LPSS[dset] <- (sum(raw_mat[human_gene,slide_tmp$species%in%c("mouse","background")])+
-        sum(raw_mat[!human_gene,slide_tmp$species%in%c("human","background")]))/sum(raw_mat)
+    # Old overall LPSS: (human UMIs in background and mouse spots + mouse UMIs in background and human spots) / all UMIs in all spots
+    # New overall LPSS: (human UMIs in mouse spots + mouse UMIs human spots) /  all UMIs in tissue spots
+    # LPSS[dset] <- (sum(raw_mat[human_gene,slide_tmp$species%in%c("mouse","background")])+
+    #     sum(raw_mat[!human_gene,slide_tmp$species%in%c("human","background")]))/sum(raw_mat)
+    
+    LPSS[dset] <- (sum(raw_mat[human_gene,slide_tmp$species%in%c("mouse")])+
+        sum(raw_mat[!human_gene,slide_tmp$species%in%c("human")]))/
+        sum(raw_mat[,c(human_spots,mouse_spots)])
     
     BG[dset] <- sum(raw_mat[,slide_tmp$tissue==0])/sum(raw_mat)
 }
@@ -330,6 +342,20 @@ round(LPSS,3)
 
 # Proportion of background UMIs
 round(BG,3)
+```
+
+per-spot LPSS distribution:
+
+```{r, echo=F}
+lpss_df <- lapply(spot_prop_list, function(x) select(x,lpss)) %>% melt %>% 
+    filter(!is.na(value)) %>% dplyr::rename(sample="L1", LPSS="value")
+lpss_df$sample[lpss_df$sample=="1_S1"] <- "HM-2"
+lpss_df$sample[lpss_df$sample=="2_S2"] <- "HM-1"
+lpss_df$sample[lpss_df$sample=="3_S3"] <- "HM-3"
+tiff(file.path(tif_dir,"per_spot_lpss_boxplot.tif"),
+     res = 300, units = "in", width = 4,height = 3)
+ggplot(lpss_df, aes(x=sample,y=LPSS))+geom_boxplot()
+dev.off()
 ```
 
 
