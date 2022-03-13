@@ -16,7 +16,11 @@ It contains
 
 - RData files for reproducing the analyses of SpatialLIBD data
 
-- Visually malignant annotation and RData files for reproducing the analyses of SPOTlight decomposition of breast cancer data
+- Visually malignant annotation and RData files for reproducing the analyses of breast cancer data
+
+- RData files for reproducing the analyses of pancreatic cancer data
+
+- Visually malignant annotation and RData files for reproducing the analyses of colorectal cancer data
 
 Zijian Ni
-07/18/2021
+02/24/2022
