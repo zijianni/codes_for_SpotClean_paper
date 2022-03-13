@@ -1,0 +1,219 @@
+---
+title: "Real data analysis - pancreatic cancer SpatialTranscriptomics data"
+author: "Zijian Ni"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, echo=F}
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(SpotClean)
+library(Seurat)
+library(Matrix)
+library(reshape2)
+library(RColorBrewer)
+
+
+
+SEED <- 2021
+
+myPalette <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "Spectral")))
+col_normal <- "#F7b6cc"
+col_tumor <- "#0e1058"
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
+# paths to ST raw data
+spatial_raw_dir <- "~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSE111672_RAW/GSM3036911.tsv"
+spatial_ts_dir <- "~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSE111672_RAW/GSM3036911_PDAC-A-ST1-filtered.txt"
+
+```
+
+### Process ST data
+
+```{r, echo=F, eval=F}
+raw_dat <- read_tsv(spatial_raw_dir)
+
+all_pos <- raw_dat$...1
+all_pos <- gsub("x","_", all_pos)
+x <- data.frame(t(raw_dat[,5]))
+colnames(x) <- all_pos
+write_tsv(x, "~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSE111672_RAW/GSM3036911_all.tsv", quote = F)
+
+raw_dat <- select(raw_dat, -...1) %>% t %>% as("dgCMatrix")
+colnames(raw_dat) <- all_pos
+
+ts_dat <- read.table(spatial_ts_dir, header = T)
+ts_pos <- colnames(ts_dat)[-1]
+ts_pos <- gsub("^X","",ts_pos)
+ts_pos <- gsub("x","_",ts_pos)
+
+ts_dat1 <- raw_dat[,ts_pos] %>% as("dgCMatrix")
+
+x <- (ts_dat[1,-1])
+colnames(x) <- ts_pos
+write_tsv(x, "~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSE111672_RAW/GSM3036911_ts.tsv", quote = F)
+
+slide_list <- data.frame(barcode=all_pos, 
+                         row= lapply(strsplit(all_pos,"_"), function(x) x[1]) %>% unlist %>% as.integer, 
+                         col=lapply(strsplit(all_pos,"_"), function(x) x[2]) %>% unlist %>% as.integer, 
+                         imagerow=lapply(strsplit(all_pos,"_"), function(x) x[1]) %>% unlist %>% as.integer, 
+                         imagecol=lapply(strsplit(all_pos,"_"), function(x) x[2]) %>% unlist %>% as.integer, 
+                         tissue=ifelse(all_pos%in%ts_pos, 1, 0),
+                         sum_umis = colSums(raw_dat))
+
+slide_obj <- CreateSlide(raw_dat, slide_list)
+set.seed(SEED)
+decont_obj <- SpotClean(slide_obj)
+decont_dat <- decont_obj@assays@data$decont
+decont_list <- filter(slide_list, tissue==1)
+decont_list$sum_umis <- colSums(decont_dat)
+
+tumor_label <- read_tsv("~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSM3036911_annotations2.tsv") %>% filter(X1=="Dorsal horn") %>% select(-X1) %>% unlist
+tumor_label <- tumor_label[colnames(decont_dat)]
+decont_list$tumor <- tumor_label
+
+
+clust_ann <- read_tsv("~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/GSM3036911_reproduce_clusters.tsv")
+clust_ann <- t(clust_ann) %>% as.data.frame
+colnames(clust_ann) <- make.names(clust_ann[1,])
+clust_ann <- clust_ann[-1,] %>% 
+    select(Ventral.horn, Dorsal.horn, Ventral.medial.white, Dorsal.edge) %>% 
+    dplyr::rename(duct_epithelium="Ventral.horn", stroma="Ventral.medial.white", 
+                  pancreatic="Dorsal.edge", cancer="Dorsal.horn")
+
+clust_ann$tissue_type <- apply(clust_ann, 1, function(x) colnames(clust_ann)[x=="1"])
+clust_ann$barcode <- rownames(clust_ann)
+
+decont_list <- inner_join(decont_list, select(clust_ann, barcode, tissue_type), by="barcode")
+save(slide_obj, decont_obj, slide_list, decont_list, file="~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/ST_PDAC_A_1_preprocess.RData")
+
+```
+
+
+```{r, echo=F, dpi=300, fig.width=8, fig.height=4}
+load("~/Google Drive/Hallu/DATA/ST/pancreatic_cancer/ST_PDAC_A_1_preprocess.RData")
+raw_dat <- slide_obj@assays@data$raw
+decont_dat <- decont_obj@assays@data$decont
+
+ggplot(slide_list, aes(x=row, y=col, fill=sum_umis))+
+    geom_tile()+labs(title="raw (all spots)")+
+    lims(x=c(0,36), y=c(0,36))+
+    scale_fill_viridis_c(trans="log1p", breaks=c(0,1,10^(1:7)), 
+                         limits = c(0, max(decont_list$sum_umis)))+
+    theme_classic()
+ggplot(decont_list, aes(x=row, y=col, fill=sum_umis))+
+    geom_tile()+labs(title="SpotClean (tissue spots)")+
+    lims(x=c(0,36), y=c(0,36))+
+    scale_fill_viridis_c(trans="log1p", breaks=c(0,1,10^(1:7)), 
+                         limits = c(0, max(decont_list$sum_umis)))+
+    theme_classic()
+
+# tiff(file.path(tif_dir,paste0("colorectal_cancer_annotation.tif")),res = 300,
+#      width = 5, height = 4, units = "in")
+ggplot(decont_list, aes(x=row, y=col, fill=tissue_type))+
+    geom_tile()+labs(fill="tissue type")+
+    lims(x=c(0,36), y=c(0,36))+
+    scale_fill_manual(values = c("#686868","#DE2C8A","#7771AE","#179C77"))+
+    theme_void()
+# dev.off()
+
+ggplot(decont_list, aes(x=row, y=col, fill=factor(tumor)))+
+    geom_tile()+labs(title="Tumor/normal annotation")+
+    lims(x=c(0,36), y=c(0,36))+
+    theme_classic()
+
+
+target_gene <- "TM4SF1" # TM4SF1, S100A4, PRSS1
+decont_list$vis <- NormalizeData(decont_dat)[target_gene,]
+decont_list$vis2 <- NormalizeData(raw_dat[,colnames(decont_dat)])[target_gene,]
+
+# tiff(file.path(tif_dir,paste0("colorectal_cancer_",target_gene,".tif")),res = 300,
+#      width = 8, height = 4, units = "in")
+plot_grid(
+    ggplot()+
+        geom_tile(data=filter(decont_list, vis2>=1), aes(x=row, y=col, fill=vis2))+
+        geom_tile(data=filter(decont_list, vis2<1), aes(x=row, y=col), fill="#d6d6d6")+
+        labs(fill=target_gene)+
+        lims(x=c(0,36), y=c(0,36))+
+        scale_fill_viridis_c(limits=c(1,max(decont_list$vis)))+
+        #theme_nothing(),
+        theme_void(),
+    ggplot()+
+        geom_tile(data=filter(decont_list, vis>=1), aes(x=row, y=col, fill=vis))+
+        geom_tile(data=filter(decont_list, vis<1), aes(x=row, y=col), fill="#d6d6d6")+
+        labs(fill=target_gene)+
+        lims(x=c(0,36), y=c(0,36))+
+        scale_fill_viridis_c(limits=c(1,max(decont_list$vis)))+
+        #theme_nothing(),
+        theme_void(),
+    ncol=2, align = "vh")
+# dev.off()
+```
+
+### Clustering spots and compare with tumor labels
+
+```{r, echo=F, dpi=300, fig.width=6, fig.height=5}
+S_sp_list <- list()
+set.seed(SEED)
+
+S_sp_list$raw <- CreateSeuratObject(raw_dat[decont_obj@metadata$decontaminated_genes, colnames(decont_dat)]) %>% 
+    NormalizeData(verbose=F) %>%
+    FindVariableFeatures(verbose=F) %>% ScaleData(verbose=F) %>%
+    RunPCA(verbose=F) %>% RunUMAP(dims=1:30,verbose=F) # %>% 
+
+S_sp_list$SpotClean <- CreateSeuratObject(decont_dat[decont_obj@metadata$decontaminated_genes,]) %>% 
+    NormalizeData(verbose=F) %>%
+    FindVariableFeatures(verbose=F) %>% ScaleData(verbose=F) %>%
+    RunPCA(verbose=F) %>% RunUMAP(dims=1:30,verbose=F) # %>% 
+    
+
+    
+# add known tissue type annotation
+
+S_sp_list$SpotClean$tissue_type <- S_sp_list$raw$tissue_type <- decont_list$tissue_type
+S_sp_list$SpotClean$malignant_status <- S_sp_list$raw$malignant_status <- 
+    ifelse(S_sp_list$SpotClean$tissue_type=="cancer", "tumor","normal")
+
+set.seed(SEED)
+# the first PC contains artifact variance. Removing it provides huge improvement on clustering.
+k <- 2
+km_raw <- kmeans(S_sp_list$raw@reductions$pca@cell.embeddings[,2:50],k)
+km_decont <- kmeans(S_sp_list$SpotClean@reductions$pca@cell.embeddings[,2:50],k)
+S_sp_list$SpotClean$km <- factor(km_decont$cluster, levels = 1:k)
+S_sp_list$raw$km <- factor(km_raw$cluster, levels = 1:k)
+
+mclust::adjustedRandIndex(S_sp_list$raw$malignant_status,S_sp_list$raw$km)
+mclust::adjustedRandIndex(S_sp_list$SpotClean$malignant_status,S_sp_list$SpotClean$km)
+aricode::NMI(S_sp_list$raw$malignant_status,S_sp_list$raw$km)
+aricode::NMI(S_sp_list$SpotClean$malignant_status,S_sp_list$SpotClean$km)
+dendextend::FM_index(S_sp_list$raw$malignant_status,S_sp_list$raw$km)
+dendextend::FM_index(S_sp_list$SpotClean$malignant_status,S_sp_list$SpotClean$km)
+
+mean((S_sp_list$raw$malignant_status=="tumor") != (S_sp_list$raw$km==1))
+mean((S_sp_list$SpotClean$malignant_status=="tumor") != (S_sp_list$SpotClean$km==2))
+
+# tiff(file.path(tif_dir,"pancreatic_cancer_UMAP_known_annotation.tif"),res = 300,
+#      width = 3.2, height = 6.5, units = "in")
+plot_grid(
+    
+    DimPlot(S_sp_list$raw, group.by = "malignant_status", 
+            pt.size = 1)+
+        theme_bw()+labs(title = "raw (ARI=0.86)")+
+        scale_color_manual(values = c(col_normal, col_tumor))+
+        theme(legend.text=element_text(size=10),legend.position = "none",
+              panel.border = element_rect(size=1)),
+    DimPlot(S_sp_list$SpotClean, group.by = "malignant_status", 
+            pt.size = 1)+
+        theme_bw()+labs(title = "SpotClean (ARI=0.89)")+
+        scale_color_manual(values = c(col_normal, col_tumor))+
+        theme(legend.text=element_text(size=10),legend.position = "none",
+              panel.border = element_rect(size=1)),
+    ncol = 1, align="vh"
+    
+)
+# dev.off()
+
+```
+
