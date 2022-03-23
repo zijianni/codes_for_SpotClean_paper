@@ -1,0 +1,101 @@
+---
+title: "Check bleeding rates of mitochondrial and long noncoding RNAs"
+author: "Zijian Ni"
+date: "2/23/2022"
+output: html_document
+---
+
+```{r, echo=F}
+library(ggplot2)
+library(Matrix)
+library(cowplot)
+library(dplyr)
+library(biomaRt)
+SEED <- 2022
+
+set.seed(SEED)
+ensembl_human <-  useMart(biomart="ensembl",dataset="hsapiens_gene_ensembl")
+ensembl_mouse <-  useMart(biomart="ensembl",dataset="mmusculus_gene_ensembl")
+
+GBM_human <- getBM(attributes=c("ensembl_gene_id", "external_gene_name",
+                             "gene_biotype"),mart=ensembl_human)
+GBM_mouse <- getBM(attributes=c("ensembl_gene_id", "external_gene_name",
+                             "gene_biotype"),mart=ensembl_mouse)
+
+lnc_genes <- c(filter(GBM_human,gene_biotype=="lncRNA")$external_gene_name,
+               filter(GBM_mouse,gene_biotype=="lncRNA")$external_gene_name) %>% unique
+mt_genes <- c(grep("^MT-",GBM_human$external_gene_name, value = T),
+              grep("^mt-",GBM_mouse$external_gene_name, value = T))
+```
+
+```{r, echo=F, fig.width=10, fig.height=12, dpi=300}
+raw_dirs <- c( "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151507/sp_151507.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151508/sp_151508.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151669/sp_151669.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151670/sp_151670.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151673/sp_151673.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/sp_151674/sp_151674.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Mouse_Kidney/V1_Mouse_Kidney.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Breast_Cancer_Block_A_Section_2/V1_Breast_Cancer_Block_A_Section_2.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Human_Lymph_Node/V1_Human_Lymph_Node.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/Targeted_Visium_Human_SpinalCord_Neuroscience/Targeted_Visium_Human_SpinalCord_Neuroscience.RData",
+               
+               
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/2_S2_manual/2_S2_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/1_S1_manual/1_S1_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/3_S3_manual/3_S3_manual.RData")
+
+sample_names <- c("LIBD_151507",
+                  "LIBD_151508",
+                  "LIBD_151669",
+                  "LIBD_151670",
+                  "LIBD_151673",
+                  "LIBD_151674",
+                  "mouse_brain",
+                  "mouse_kidney",
+                  "human_breast",
+                  "human_breast_2",
+                  "human_lymphnode",
+                  "human_spinalcord",
+                  "HM-1",
+                  "HM-2",
+                  "HM-3")
+
+
+
+bg_cutoff <- 10
+
+density_list <- boxplot_list <- list()
+for(idx in seq_along(raw_dirs)){
+    rda <- raw_dirs[idx]
+    load(rda)
+
+    # rename genes in the chimeric samples
+    if(grepl("_",rownames(analysis_out$raw_matrix)[1])){ # chimeric samples
+        rownames(analysis_out$raw_matrix) <- strsplit(rownames(analysis_out$raw_matrix),"_") %>% 
+            lapply(tail,1) %>% unlist
+    }
+    
+    bg_mat <- analysis_out$raw_matrix[,filter(analysis_out$bcs,tissue==0)$barcode]
+
+    top_genes <- rownames(bg_mat)[rowSums(bg_mat)>=bg_cutoff]
+    bg_prop <- rowSums(bg_mat[top_genes,])/rowSums(analysis_out$raw_matrix[top_genes,])
+    
+    mt_lnc_genes <- names(bg_prop)%in%c(lnc_genes, mt_genes)
+    
+    bg_prop_df <- data.frame(gene=names(bg_prop),bg_prop=bg_prop,biotype=ifelse(mt_lnc_genes,"mt_lnc","not mt_lnc"))
+    
+    boxplot_list[[analysis_out$sample_name]] <- ggplot(bg_prop_df, aes(y=bg_prop, x=biotype, fill=biotype))+
+        geom_boxplot()+
+        labs(title=sample_names[idx],subtitle = paste0(
+            "mt_lnc: ",table(bg_prop_df$biotype)["mt_lnc"],
+            " genes\nnot mt_lnc: ",table(bg_prop_df$biotype)["not mt_lnc"]," genes"
+        ))+theme_bw()
+
+}
+
+
+plot_grid(plotlist = boxplot_list, align = "vh", ncol=3)
+```

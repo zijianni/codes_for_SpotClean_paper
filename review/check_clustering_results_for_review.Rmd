@@ -1,0 +1,113 @@
+---
+title: "Check general clustering performance of SpotClean"
+author: "Zijian Ni"
+date: "2/23/2022"
+output: html_document
+---
+
+```{r, echo=F}
+library(ggplot2)
+library(Matrix)
+library(cowplot)
+library(dplyr)
+library(SpotClean)
+library(Seurat)
+SEED <- 2022
+
+seurat_pipeline <- function(dat){
+    S_obj <- CreateSeuratObject(dat) %>% 
+        NormalizeData(verbose=F) %>%
+        FindVariableFeatures(verbose=F) %>% ScaleData(verbose=F) %>%
+        RunPCA(verbose=F) %>% RunUMAP(dims=1:25, verbose=F) %>% 
+        FindNeighbors(dims=1:25, verbose=F) %>% FindClusters(verbose=F)
+    return(S_obj)
+}
+
+find_clusters <- function(raw_mat, decont_mat, tit){
+
+    S_raw <- seurat_pipeline(raw_mat)
+    S_decont <- seurat_pipeline(decont_mat)
+    
+    return(list(umap=list(raw=DimPlot(S_raw)+labs(title=tit, subtitle = "raw"), 
+                          decont=DimPlot(S_decont)+labs(title=tit, subtitle="SpotClean")),
+                clust=list(raw=S_raw$seurat_clusters, 
+                           decont=S_decont$seurat_clusters)))
+}
+```
+
+```{r, echo=F, eval=F}
+clust_list <- list()
+umap_list <- list()
+
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/12brains.RData")
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/6brains_decont.RData")
+names(raw_matrix) <- paste0("LIBD_",names(raw_matrix))
+names(decont_obj_list) <- gsub("sp","LIBD",names(decont_obj_list))
+
+for(dset in names(decont_obj_list)){
+    message(dset)
+    decont_mat <- decont_obj_list[[dset]]@assays@data$decont
+    set.seed(SEED)
+    clust_out <- find_clusters(raw_matrix[[dset]][rownames(decont_mat),colnames(decont_mat)],
+                               decont_mat, dset)
+    
+    clust_list[[dset]] <- clust_out$clust
+    umap_list[[dset]] <- clust_out$umap
+    
+}
+
+rm(raw_matrix)
+rm(decont_obj_list)
+gc()
+
+raw_dirs <- c( "~/Google Drive/Hallu/codes/ckgroup/spatial_data/Visium_FFPE_Human_Breast_Cancer/Visium_FFPE_Human_Breast_Cancer.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Human_Lymph_Node/V1_Human_Lymph_Node.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/Targeted_Visium_Human_SpinalCord_Neuroscience/Targeted_Visium_Human_SpinalCord_Neuroscience.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Breast_Cancer_Block_A_Section_2/V1_Breast_Cancer_Block_A_Section_2.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/V1_Mouse_Kidney/V1_Mouse_Kidney.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/2_S2_manual/2_S2_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/1_S1_manual/1_S1_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/3_S3_manual/3_S3_manual.RData")
+
+
+
+for(rda in raw_dirs){
+    load(rda)
+    if(analysis_out$sample_name=="1_S1_manual"){
+        analysis_out$sample_name <- "HM-2"
+    }else if(analysis_out$sample_name=="2_S2_manual"){
+        analysis_out$sample_name <- "HM-1"
+    }else if(analysis_out$sample_name=="3_S3_manual"){
+        analysis_out$sample_name <- "HM-3"
+    }
+    dset <- analysis_out$sample_name
+    raw_mat <- analysis_out$raw_matrix
+    slide_info <- list(slide=analysis_out$bcs)
+    rm(analysis_out)
+    gc()
+    
+    set.seed(SEED)
+    slide_obj <- CreateSlide(raw_mat, slide_info)
+    decont_obj <- SpotClean(slide_obj)
+    
+    set.seed(SEED)
+    clust_out <- find_clusters(raw_mat[rownames(decont_obj),colnames(decont_obj)],
+                               decont_obj@assays@data$decont, dset)
+    
+    clust_list[[dset]] <- clust_out$clust
+    umap_list[[dset]] <- clust_out$umap
+
+}
+
+save(clust_list, umap_list,
+     file="~/Google Drive/Hallu/codes/ckgroup/spatial_data/clust_compare_for_review.RData")
+```
+
+```{r, echo=F, fig.width=16, fig.height=28}
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/clust_compare_for_review.RData")
+
+lapply(clust_list, function(x) c(length(unique(x$raw)), length(unique(x$decont))))
+
+plot_grid(plotlist = unlist(umap_list, recursive = F), align = "vh", ncol=4)
+```

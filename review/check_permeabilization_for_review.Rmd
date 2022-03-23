@@ -1,0 +1,167 @@
+---
+title: "Check the relationship between bleeding rate and permeabilization time"
+author: "Zijian Ni"
+date: "2/23/2022"
+output: html_document
+---
+
+```{r, echo=F}
+library(tidyverse)
+library(Matrix)
+library(cowplot)
+library(SpotClean)
+SEED <- 2022
+```
+
+### 6min
+
+```{r, echo=F, eval=F}
+raw_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/6min/"
+decont_obj_list_6min <- list()
+for(fname in list.files(raw_dir)){
+    tmp_dir <- file.path(raw_dir, fname)
+    raw_h5 <- list.files(tmp_dir,"raw_feature", full.names = T)
+    ts_csv <- list.files(tmp_dir,"tissue_positions", full.names = T)
+    
+    set.seed(SEED)
+    slide_obj <- CreateSlide(Read10xRawH5(raw_h5), Read10xSlide(ts_csv))
+    decont_obj_list_6min[[fname]] <- SpotClean(slide_obj)
+}
+
+save(decont_obj_list_6min, file="~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/6min/decont.RData")
+```
+
+
+### 12min
+
+```{r, echo=F, eval=F}
+raw_dirs <- c("~/Google Drive/Hallu/codes/ckgroup/spatial_data/2_S2_manual/2_S2_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/1_S1_manual/1_S1_manual.RData",
+               "~/Google Drive/Hallu/codes/ckgroup/spatial_data/3_S3_manual/3_S3_manual.RData")
+
+decont_obj_list_12min <- list()
+for(rda in raw_dirs){
+    load(rda)
+    if(analysis_out$sample_name=="1_S1_manual"){
+        analysis_out$sample_name <- "HM-2"
+    }else if(analysis_out$sample_name=="2_S2_manual"){
+        analysis_out$sample_name <- "HM-1"
+    }else if(analysis_out$sample_name=="3_S3_manual"){
+        analysis_out$sample_name <- "HM-3"
+    }
+    dset <- analysis_out$sample_name
+    raw_mat <- analysis_out$raw_matrix
+    slide_info <- list(slide=analysis_out$bcs)
+    rm(analysis_out)
+    gc()
+    
+    set.seed(SEED)
+    slide_obj <- CreateSlide(raw_mat, slide_info)
+    decont_obj_list_12min[[dset]] <- SpotClean(slide_obj)
+    
+}
+
+save(decont_obj_list_12min, file="~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/12min(chimeric)/decont.RData")
+
+```
+
+
+### 18min
+
+```{r, echo=F, eval=F}
+raw_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/18min"
+decont_obj_list_18min <- list()
+for(fname in list.files(raw_dir,"GSM")){
+    dset <- gsub("(GSM.*)_Sam.*","\\1",fname)
+    tmp_dir <- file.path(raw_dir, fname)
+    raw_tmp <- list.files(tmp_dir,"raw_feature", full.names = T)
+    ts_csv <- file.path(tmp_dir, "spatial/tissue_positions_list.csv")
+    
+    set.seed(SEED)
+    slide_obj <- CreateSlide(Read10xRaw(raw_tmp), Read10xSlide(ts_csv))
+    decont_obj_list_18min[[fname]] <- SpotClean(slide_obj)
+}
+
+save(decont_obj_list_18min, file="~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/18min/decont.RData")
+
+
+```
+
+
+### 30min
+
+```{r, echo=F, eval=F}
+raw_dir <- "~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/30min/"
+decont_obj_list_30min <- list()
+for(fname in list.files(raw_dir)){
+    tmp_dir <- file.path(raw_dir, fname)
+    raw_tmp <- list.files(tmp_dir,"raw_feature_bc_matrix$", full.names = T)
+    raw_h5 <- list.files(tmp_dir,"raw_feature_bc_matrix.h5", full.names = T)
+    ts_csv <- list.files(tmp_dir,"tissue_positions", full.names = T)
+    
+    set.seed(SEED)
+    if(length(raw_tmp)==0){
+        slide_obj <- CreateSlide(Read10xRawH5(raw_h5), Read10xSlide(ts_csv))
+    }else{
+        slide_obj <- CreateSlide(Read10xRaw(raw_tmp), Read10xSlide(ts_csv))
+    }
+    
+    decont_obj_list_30min[[fname]] <- SpotClean(slide_obj)
+}
+
+save(decont_obj_list_30min, file="~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/30min/decont.RData")
+```
+
+
+### Summarlize results
+
+```{r, echo=F, dpi=300, fig.width=12, fig.height=4}
+load("~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/6min/decont.RData")
+load("~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/12min(chimeric)/decont.RData")
+load("~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/18min/decont.RData")
+load("~/Google Drive/Hallu/codes/ckgroup/spatial_data/spatialLIBD/6brains_decont.RData") # 18min
+load("~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/30min/decont.RData")
+
+summary_df <- rbind(
+
+data.frame(dataset=names(decont_obj_list_6min), 
+           study="Dhainaut_etal_2021", 
+           perm_min=6, 
+           bleeding_rate=unlist(lapply(decont_obj_list_6min, function(x) round(x@metadata$bleeding_rate,2))), 
+           distal_rate=unlist(lapply(decont_obj_list_6min, function(x) round(x@metadata$distal_rate,2)))),
+
+data.frame(dataset=names(decont_obj_list_12min), 
+           study="chimeric", 
+           perm_min=12, 
+           bleeding_rate=unlist(lapply(decont_obj_list_12min, function(x) round(x@metadata$bleeding_rate,2))), 
+           distal_rate=unlist(lapply(decont_obj_list_12min, function(x) round(x@metadata$distal_rate,2)))),
+
+data.frame(dataset=names(decont_obj_list_18min), 
+           study="Misra_etal_2021", 
+           perm_min=18, 
+           bleeding_rate=unlist(lapply(decont_obj_list_18min, function(x) round(x@metadata$bleeding_rate,2))), 
+           distal_rate=unlist(lapply(decont_obj_list_18min, function(x) round(x@metadata$distal_rate,2)))),
+
+data.frame(dataset=names(decont_obj_list), 
+           study="spatialLIBD", 
+           perm_min=18, 
+           bleeding_rate=unlist(lapply(decont_obj_list, function(x) round(x@metadata$bleeding_rate,2))), 
+           distal_rate=unlist(lapply(decont_obj_list, function(x) round(x@metadata$global_contamination_rate,2)))),
+
+data.frame(dataset=names(decont_obj_list_30min), 
+           study=rep(c("PK_etal_2022","Parigi_etal_2022"),c(2,4)), 
+           perm_min=30, 
+           bleeding_rate=unlist(lapply(decont_obj_list_30min, function(x) round(x@metadata$bleeding_rate,2))), 
+           distal_rate=unlist(lapply(decont_obj_list_30min, function(x) round(x@metadata$distal_rate,2))))
+)
+
+gp1 <- ggplot(summary_df, aes(x=perm_min, y=bleeding_rate, color=study))+geom_point()+
+    scale_color_manual(values =  Seurat::DiscretePalette(6))+theme_bw()+
+    labs(title="bleeding rate ~ permeabilization time")
+
+gp2 <- ggplot(summary_df, aes(x=perm_min, y=distal_rate, color=study))+geom_point()+
+    scale_color_manual(values =  Seurat::DiscretePalette(6))+theme_bw()+
+    labs(title="distal rate ~ permeabilization time")
+
+plot_grid(gp1, gp2, align="vh", ncol=2)
+```
