@@ -11,6 +11,8 @@ library(Matrix)
 library(cowplot)
 library(SpotClean)
 SEED <- 2022
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
+
 ```
 
 ### 6min
@@ -125,7 +127,8 @@ load("~/Google Drive/Hallu/DATA/10x/Spatial/test_permeabilization/30min/decont.R
 summary_df <- rbind(
 
 data.frame(dataset=names(decont_obj_list_6min), 
-           study="Dhainaut_etal_2021", 
+           # study="Dhainaut_etal_2021", 
+           study="GSE193460", 
            perm_min=6, 
            bleeding_rate=unlist(lapply(decont_obj_list_6min, function(x) round(x@metadata$bleeding_rate,2))), 
            distal_rate=unlist(lapply(decont_obj_list_6min, function(x) round(x@metadata$distal_rate,2)))),
@@ -137,7 +140,8 @@ data.frame(dataset=names(decont_obj_list_12min),
            distal_rate=unlist(lapply(decont_obj_list_12min, function(x) round(x@metadata$distal_rate,2)))),
 
 data.frame(dataset=names(decont_obj_list_18min), 
-           study="Misra_etal_2021", 
+           # study="Misra_etal_2021", 
+           study="GSE188888", 
            perm_min=18, 
            bleeding_rate=unlist(lapply(decont_obj_list_18min, function(x) round(x@metadata$bleeding_rate,2))), 
            distal_rate=unlist(lapply(decont_obj_list_18min, function(x) round(x@metadata$distal_rate,2)))),
@@ -149,19 +153,23 @@ data.frame(dataset=names(decont_obj_list),
            distal_rate=unlist(lapply(decont_obj_list, function(x) round(x@metadata$global_contamination_rate,2)))),
 
 data.frame(dataset=names(decont_obj_list_30min), 
-           study=rep(c("PK_etal_2022","Parigi_etal_2022"),c(2,4)), 
+           # study=rep(c("PK_etal_2022","Parigi_etal_2022"),c(2,4)), 
+           study=rep(c("GSE178361","GSE169749", "GSE190595"),each=2), 
            perm_min=30, 
            bleeding_rate=unlist(lapply(decont_obj_list_30min, function(x) round(x@metadata$bleeding_rate,2))), 
            distal_rate=unlist(lapply(decont_obj_list_30min, function(x) round(x@metadata$distal_rate,2))))
 )
 
 gp1 <- ggplot(summary_df, aes(x=perm_min, y=bleeding_rate, color=study))+geom_point()+
-    scale_color_manual(values =  Seurat::DiscretePalette(6))+theme_bw()+
-    labs(title="bleeding rate ~ permeabilization time")
+    scale_color_manual(values =  Seurat::DiscretePalette(7))+theme_bw()+
+    labs(title="Bleeding rate vs. permeabilization time")
 
 gp2 <- ggplot(summary_df, aes(x=perm_min, y=distal_rate, color=study))+geom_point()+
-    scale_color_manual(values =  Seurat::DiscretePalette(6))+theme_bw()+
-    labs(title="distal rate ~ permeabilization time")
+    scale_color_manual(values =  Seurat::DiscretePalette(7))+theme_bw()+
+    labs(title="Distal rate vs. permeabilization time")
 
+tiff(file.path(tif_dir,paste0("bleeding_distal_perm_time.tif")),
+     width = 10, height = 3.5,units = "in",res = 300, compression = "lzw")
 plot_grid(gp1, gp2, align="vh", ncol=2)
+dev.off()
 ```

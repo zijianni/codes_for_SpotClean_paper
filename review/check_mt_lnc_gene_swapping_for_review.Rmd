@@ -12,6 +12,7 @@ library(cowplot)
 library(dplyr)
 library(biomaRt)
 SEED <- 2022
+tif_dir <- "~/Google Drive/Hallu/codes/ckgroup/spatial_data/manuscript/figures/Rplots"
 
 set.seed(SEED)
 ensembl_human <-  useMart(biomart="ensembl",dataset="hsapiens_gene_ensembl")
@@ -87,15 +88,20 @@ for(idx in seq_along(raw_dirs)){
     
     bg_prop_df <- data.frame(gene=names(bg_prop),bg_prop=bg_prop,biotype=ifelse(mt_lnc_genes,"mt_lnc","not mt_lnc"))
     
+    tt <- t.test(filter(bg_prop_df, biotype=="mt_lnc")$bg_prop, filter(bg_prop_df, biotype!="mt_lnc")$bg_prop)
+
     boxplot_list[[analysis_out$sample_name]] <- ggplot(bg_prop_df, aes(y=bg_prop, x=biotype, fill=biotype))+
-        geom_boxplot()+
+        geom_boxplot(outlier.size = 0.5)+
         labs(title=sample_names[idx],subtitle = paste0(
             "mt_lnc: ",table(bg_prop_df$biotype)["mt_lnc"],
-            " genes\nnot mt_lnc: ",table(bg_prop_df$biotype)["not mt_lnc"]," genes"
-        ))+theme_bw()
+            " genes\nnot mt_lnc: ",table(bg_prop_df$biotype)["not mt_lnc"],
+            " genes\np-value=",round(tt$p.value,3)), x="")+
+        theme_bw()+theme(legend.position = "none")
 
 }
 
-
-plot_grid(plotlist = boxplot_list, align = "vh", ncol=3)
+tiff(file.path(tif_dir,paste0("bleeding_rate_mt_lnc.tif")),
+     width = 12, height = 8,units = "in",res = 300, compression = "lzw")
+plot_grid(plotlist = boxplot_list, align = "vh", ncol=5)
+dev.off()
 ```
