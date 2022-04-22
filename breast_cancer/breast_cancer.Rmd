@@ -58,6 +58,7 @@ slide_obj@metadata$slide$visual_tumor[is.na(slide_obj@metadata$slide$visual_tumo
 # load single-cell reference data
 bc_sc_ann <- read.table(sc_ann_dir, header = T, row.names = 1) %>% filter(type=="SC")
 bc_sc_ann$cell <- rownames(bc_sc_ann)
+bc_sc_ann$label <- ifelse(bc_sc_ann$index=="Tumor","malignant","non-malignant")
 
 bc_sc <- read.table(sc_dir, header = T, row.names = 1) %>% 
     filter(gene_name%in%rownames(slide_obj),gene_type=="protein_coding")
@@ -256,13 +257,10 @@ true_normal_spot <- rownames(decon_mtrx_list$raw)[
     decon_mtrx_list$raw[,"Tumor"]<0.05 & decon_mtrx_list$SpotClean[,"Tumor"]<0.05
 ]
 
-
 false_tumor_spot <- rownames(decon_mtrx_list$raw)[
     decon_mtrx_list$raw[,"Tumor"]>=malig_cutoff & decon_mtrx_list$SpotClean[,"Tumor"]<malig_cutoff
 ]
-false_normal_spot <- rownames(decon_mtrx_list$raw)[
-    decon_mtrx_list$raw[,"Tumor"]<malig_cutoff & decon_mtrx_list$SpotClean[,"Tumor"]>=malig_cutoff
-]
+
 true_tumor_spot <- rownames(decon_mtrx_list$raw)[
     decon_mtrx_list$raw[,"Tumor"]>=0.3 & decon_mtrx_list$SpotClean[,"Tumor"]>=0.3
 ]
@@ -270,24 +268,19 @@ true_tumor_spot <- rownames(decon_mtrx_list$raw)[
 
 S_sp_list$raw$malignant_status_sub <- "NA"
 S_sp_list$raw$malignant_status_sub[true_normal_spot] <- "strongly non-malignant"
-S_sp_list$raw$malignant_status_sub[false_tumor_spot] <- "raw questionably malignant"
-S_sp_list$raw$malignant_status_sub[false_normal_spot] <- "SpotClean questionably malignant"
+S_sp_list$raw$malignant_status_sub[false_tumor_spot] <- "questionably malignant"
 S_sp_list$raw$malignant_status_sub[true_tumor_spot] <- "strongly malignant"
 
-ft_cor_df <- data.frame(barcode=false_tumor_spot, spot_group="raw questionably malignant")
-fn_cor_df <- data.frame(barcode=false_normal_spot, spot_group="SpotClean questionably malignant")
+ft_cor_df <- data.frame(barcode=false_tumor_spot, spot_group="questionably malignant")
 tt_cor_df <- data.frame(barcode=true_tumor_spot, spot_group="strongly malignant")
 tn_cor_df <- data.frame(barcode=true_normal_spot, spot_group="strongly non-malignant")
 
-bc_sc_ann$label <- ifelse(bc_sc_ann$index=="Tumor","malignant","non-malignant")
 
 com_gene <- intersect(decont_obj@metadata$decontaminated_genes, rownames(bc_sc_mat))
 for(ct in unique(bc_sc_ann$label)){
     ave_exp <- rowMeans(bc_sc_mat[com_gene,rownames(filter(bc_sc_ann, label==ct))])
     
     ft_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[com_gene,false_tumor_spot],
-                          2, function(x) cor(x,ave_exp, method = "spearman"))
-    fn_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[com_gene,false_normal_spot],
                           2, function(x) cor(x,ave_exp, method = "spearman"))
     tt_cor_df[[ct]] <- apply(decont_obj@assays@data$decont[com_gene,true_tumor_spot],
                           2, function(x) cor(x,ave_exp, method = "spearman"))
@@ -299,13 +292,13 @@ for(ct in unique(bc_sc_ann$label)){
 ```
 
 ```{r, echo=F, dpi=300, fig.width=6, fig.height=2}
-melt_df <- melt(rbind(ft_cor_df,fn_cor_df,tt_cor_df,tn_cor_df),
+melt_df <- melt(rbind(ft_cor_df,tt_cor_df,tn_cor_df),
      id.vars = c("barcode","spot_group"),variable.name = "cell_type",
      value.name = "correlation")
 melt_df$spot_group <- factor(
     melt_df$spot_group,
-    levels = c("strongly non-malignant","raw questionably malignant",
-               "SpotClean questionably malignant","strongly malignant"))
+    levels = c("strongly non-malignant","questionably malignant",
+               "strongly malignant"))
 
 # tiff(file.path(tif_dir,"breast_cancer_decomp_boxplot.tif"),res = 300,
 #      width = 5, height = 1.8, units = "in")

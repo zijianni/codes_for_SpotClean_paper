@@ -352,10 +352,10 @@ lpss_df <- lapply(spot_prop_list, function(x) select(x,lpss)) %>% melt %>%
 lpss_df$sample[lpss_df$sample=="1_S1"] <- "HM-2"
 lpss_df$sample[lpss_df$sample=="2_S2"] <- "HM-1"
 lpss_df$sample[lpss_df$sample=="3_S3"] <- "HM-3"
-tiff(file.path(tif_dir,"per_spot_lpss_boxplot.tif"),
-     res = 300, units = "in", width = 4,height = 3)
+# tiff(file.path(tif_dir,"per_spot_lpss_boxplot.tif"),
+#      res = 300, units = "in", width = 4,height = 3)
 ggplot(lpss_df, aes(x=sample,y=LPSS))+geom_boxplot()
-dev.off()
+# dev.off()
 ```
 
 
@@ -367,8 +367,7 @@ for(dset in names(slide_obj_list)){
     
     prop_df <- spot_prop_list[[dset]] %>% filter(species%in%c("human","mouse","background")) %>%
         melt(id.vars="species", measure.vars=c("human_prop","mouse_prop"))
-    # prop_df <- spot_prop_list[[dset]] %>% #filter(species%in%c("human","mouse")) %>%
-    #     melt(id.vars="species", measure.vars=c("human_prop2","mouse_prop2"))
+
     prop_df$hm_in_region <- paste(prop_df$variable, prop_df$species,sep = "_")
     
     
@@ -387,27 +386,11 @@ for(dset in names(slide_obj_list)){
               axis.line = element_line(colour = "black"),legend.position = "none")
     
     gp_list[[dset]] <- gp
-    
-    
-    prop_df <- spot_prop_list[[dset]] %>% filter(species%in%c("human","mouse","background")) %>% 
-        select(species,lpss)
-    
-    gp <- ggplot(prop_df, aes(y=lpss, color=species))+
-        geom_boxplot()+labs(y="LPSS",color="spots")+theme_bw()+ylim(c(0,5e-4))+
-        theme(axis.text.x = element_blank(),
-              axis.ticks.x = element_blank(),
-              panel.grid.major = element_blank(), 
-              panel.grid.minor = element_blank(),
-              panel.background = element_blank(), 
-              axis.line = element_line(colour = "black"))+ggtitle(dset)
-    
-    lpss_list[[dset]] <- gp
 
 }
 # tiff(file.path(tif_dir,"MS_down_hmprop_nol.tif"),
 #      res = 300, units = "in", width = 10,height = 3)
 plot_grid(plotlist = gp_list[c(2,1,3)], align = "vh", ncol=3)
-# plot_grid(plotlist = lpss_list[c(2,1,3)], align = "vh", ncol=3)
 # dev.off()
 ```
 
